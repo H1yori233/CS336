@@ -560,7 +560,7 @@ def get_tokenizer(
     """
     
     from cs336_basics.tokenizer import BPETokenizer
-    tokenizer = BPETokenizer.from_files(vocab, merges, special_tokens)
+    tokenizer = BPETokenizer(vocab, merges, special_tokens)
     return tokenizer
 
 
@@ -594,5 +594,5 @@ def run_train_bpe(
     
     from cs336_basics.tokenizer import BPETrainer
     tokenizer = BPETrainer(vocab_size, special_tokens)
-    vocab, merges = tokenizer.get_tokenizer(input_path)
+    vocab, merges = tokenizer.run_train_bpe(input_path)
     return vocab, merges

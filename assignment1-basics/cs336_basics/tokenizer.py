@@ -6,6 +6,7 @@ from multiprocessing import Pool
 import heapq
 
 # --- Custom Utilities ---
+
 class _Node:
     def __init__(self, token_id: int, count_ref: dict[str, int]):
         self.id = token_id 
@@ -37,7 +38,10 @@ class _PriorityQueueItem:
         # 3. If still equal, compare p2_bytes lexicographically.
         return self.p2_bytes > other.p2_bytes
 
+
+    
 # --- BPE Trainer & Tokenizer ---
+
 class BPETrainer:
     """A BPE Trainer to learn vocabulary and merges from a corpus."""
     
@@ -96,59 +100,6 @@ class BPETrainer:
             for chunk_pretoken_counts in chunk_results:
                 for token_ids, count in chunk_pretoken_counts.items():
                     self.pretoken_counts[token_ids] += count
-    
-    def old_merge(self):
-        '''
-        Naive implementation of merge.
-        
-        It will iterate pretoken_counts to get the most common pair,
-        and need to iterate again to get the updated pretoken_counts.
-        '''
-        while len(self.vocab) < self.vocab_size:
-            pair_counts: collections.defaultdict[tuple[int, int], int] = collections.defaultdict(int)
-            for token_id_list, count in self.pretoken_counts.items():
-                for i in range(len(token_id_list) - 1):
-                    id1, id2 = token_id_list[i], token_id_list[i+1]
-                    # Skip pairs involving special tokens
-                    if id1 in self.special_token_ids or id2 in self.special_token_ids:
-                        continue
-                    pair_counts[(id1, id2)] += count
-            if not pair_counts: break # No need for more merges
-            
-            # get the most common pair
-            max_count = max(pair_counts.values())
-            top_pairs = [p for p, c in pair_counts.items() if c == max_count]
-            common_pair = max(top_pairs, key=lambda p: (self.vocab[p[0]], self.vocab[p[1]]))
-            
-            id1, id2 = common_pair
-            token1_bytes, token2_bytes = self.vocab[id1], self.vocab[id2]
-            new_token_bytes = token1_bytes + token2_bytes
-            
-            # update vocab and query table
-            new_id = self.allocate_id()
-            self.vocab[new_id] = new_token_bytes
-            self.byte_string_to_id[new_token_bytes] = new_id
-            self.merges.append((token1_bytes, token2_bytes)) 
-            
-            # update pretoken_counts
-            updated_pretoken_counts = collections.defaultdict(int)
-            for token_id_list, count in self.pretoken_counts.items():
-                token_id_list = list(token_id_list)
-                if len(token_id_list) >= 2 and token_id_list[0] == id1 and token_id_list[1] == id2:
-                    new_token_id_list = [new_id] + token_id_list[2:] # replace 0, 1 ids
-                    updated_pretoken_counts[tuple(new_token_id_list)] += count
-                else:
-                    i = 0
-                    temp_list = []
-                    while i < len(token_id_list):
-                        if i + 1 < len(token_id_list) and token_id_list[i] == id1 and token_id_list[i+1] == id2:
-                            temp_list.append(new_id)  # replace i, i+1 ids
-                            i += 2
-                        else:
-                            temp_list.append(token_id_list[i]) # remain the original ids
-                            i += 1
-                    updated_pretoken_counts[tuple(temp_list)] += count    
-            self.pretoken_counts = updated_pretoken_counts
     
     def merge(self):
         '''
@@ -250,7 +201,7 @@ class BPETrainer:
             del pair_counts[best_pair]
             del pair_to_nodes[best_pair]
     
-    def get_tokenizer(self, input_path: str | os.PathLike) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+    def run_train_bpe(self, input_path: str | os.PathLike) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
         self.pretokenize(input_path)
         self.merge()
         return self.vocab, self.merges
@@ -358,8 +309,21 @@ class BPETokenizer:
     
     def __init__(self, vocab: dict[int, bytes], merges: list[tuple[bytes, bytes]], 
                        special_tokens: list[str] | None = None):
-        raise NotImplementedError
+        self.vocab = vocab
+        self.merges = merges
+        # sort special tokens by length in descending order
+        self.special_tokens = sorted(special_tokens, key=len, reverse=True) if special_tokens else []
         
+        self.byte_string_to_id = {v: k for k, v in self.vocab.items()}
+        self.merge_ranks = {pair: i for i, pair in enumerate(self.merges)} # { pair : rank (position in the dict) }
+        
+        self.PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+        self.split_special_token = special_tokens[0].encode("utf-8") if special_tokens else b'\n'
+        if special_tokens:
+            self.split_special_pattern = f"({ '|'.join([re.escape(st) for st in special_tokens]) })"
+        else:
+            self.split_special_pattern = None
+      
     # --- Main Functions ---
     
     @classmethod    
@@ -369,33 +333,140 @@ class BPETokenizer:
         Class method that constructs and return a Tokenizer from a serialized vocabulary and 
         list of merges and a list of special tokens.
         '''
-        raise NotImplementedError
+        
+        import json
+        with open(vocab_filepath, "r", encoding="utf-8") as f:
+            data = json.load(f) # (tokens: count)
+            vocab = {int(token_id): token_str.encode("utf-8") 
+                     for token_str, token_id in data.items()} # (int, bytes)
+
+        merges = []
+        with open(merges_filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                
+                parts = line.strip().split()
+                if len(parts) == 2:
+                    p1 = parts[0].encode("utf-8")
+                    p2 = parts[1].encode("utf-8")
+                    merges.append((p1, p2))
+
+        return cls(vocab, merges, special_tokens)
         
     def encode(self, text: str) -> list[int]:
         '''
         Encode an input text into a sequence of token IDs.
         '''
-        raise NotImplementedError
-    
-    def _apply_bpe(self, tokens: list[bytes]) -> list[bytes]:
-        '''Apply BPE merges to a list of byte tokens'''
-        raise NotImplementedError
+        ids = []
+        text_parts = self._split_with_special_tokens(text)
+        for part in text_parts:
+            if not part:
+                continue
+            
+            if part in self.special_tokens:
+                token_bytes = part.encode('utf-8')
+                if token_bytes in self.byte_string_to_id:
+                    token_id = self.byte_string_to_id[token_bytes]
+                    ids.append(token_id)
+            else:
+                for match in re.finditer(self.PAT, part):
+                    token_str = match.group()
+                    tokens = self._apply_bpe(token_str.encode('utf-8'))
+                    token_ids = [self.byte_string_to_id[b] for b in tokens]
+                    ids.extend(token_ids)
+        return ids
     
     def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
         '''
         Given an iterable of strings (e.g., a Python file handle), return a generator that lazily yields token IDs. 
         This is required for memory-efficient tokenization of large files that we cannot directly load into memory.
         '''
-        raise NotImplementedError
-        
+        for text in iterable:
+            yield from self.encode(text)
+            
     def decode(self, ids: list[int]) -> str:
         '''
         Decode a sequence of token IDs into text
         '''
-        raise NotImplementedError
+        bytes_list = [self.vocab[id] for id in ids]
+        # using errors='replace' automatically replace malformed data with the replacement marker.
+        return b''.join(bytes_list).decode("utf-8", errors="replace")
 
- 
+
+    # --- Helper Functions ---
+
+    @staticmethod
+    def get_pairs(parts: list[bytes]) -> set[tuple[bytes, bytes]]:
+        return set(zip(parts, parts[1:]))
+
+    def _apply_bpe(self, tokens: list[bytes]) -> list[bytes]:
+        '''Apply BPE merges to a list of byte tokens'''
+        
+        parts = [bytes([b]) for b in tokens] # split tokens into single bytes
+        if len(parts) < 2:
+            return parts
+        
+        while True:
+            pairs = self.get_pairs(parts)
+            if not pairs:
+                break
+            best_pair = min(pairs, key=lambda pair: self.merge_ranks.get(pair, float('inf')))
+            if best_pair not in self.merges:
+                break
+            
+            p1, p2 = best_pair
+            new_parts = []
+            i = 0
+            while i < len(parts):
+                if parts[i] == p1 and i + 1 < len(parts) and parts[i+1] == p2:
+                    new_parts.append(p1 + p2)
+                    i += 2
+                else:
+                    new_parts.append(parts[i])
+                    i += 1
+            parts = new_parts
+            if len(parts) == 1:
+                break
+            
+        return parts
+
+    def _split_with_special_tokens(self, text: str) -> list[str]:
+        '''
+        Split text while preserving special tokens, with proper handling of overlapping tokens.
+        '''
+        if not self.special_tokens:
+            return [text]
+        
+        parts = []
+        i = 0
+        while i < len(text):
+            matched_token = None
+            matched_length = 0
+            
+            for token in self.special_tokens:
+                if text[i:].startswith(token):
+                    matched_token = token
+                    matched_length = len(token)
+                    break
+            
+            if matched_token:
+                if parts and not parts[-1]:
+                    parts.pop()
+                parts.append(matched_token)
+                i += matched_length
+            else:
+                if not parts or parts[-1] in self.special_tokens:
+                    parts.append('')
+                parts[-1] += text[i]
+                i += 1
+        
+        return [part for part in parts if part]
+
+
+
 # --- TESTING ---
+
 def train_and_profile_cli():
     """
     Command-line interface function to train the tokenizer and profile its performance.
@@ -417,8 +488,8 @@ def train_and_profile_cli():
     args = parser.parse_args()
     
     base_path, _ = os.path.splitext(args.input_path)
-    merges_file_path = f"{base_path}-merges-vocab_size_{args.vocab_size}.txt"
-    vocab_file_path = f"{base_path}-vocab-vocab_size_{args.vocab_size}.json"
+    merges_file_path =  f"{base_path}-vocab_size_{args.vocab_size}-merges.txt"
+    vocab_file_path =   f"{base_path}-vocab_size_{args.vocab_size}-vocab.json"
     
     # --- Profiling ---
     profiler = cProfile.Profile()
@@ -459,7 +530,7 @@ def train_and_profile_cli():
     
     print("\nStep 3: Saving vocabulary and merges...")
     try:
-        inverted_vocab = {v.decode('latin-1'): k for k, v in tokenizer.vocab.items()}
+        inverted_vocab = {v.decode('utf-8'): k for k, v in tokenizer.vocab.items()}
         with open(vocab_file_path, "w", encoding="utf-8") as f:
             json.dump(inverted_vocab, f, ensure_ascii=False, indent=2)
         print(f"   Vocabulary saved to {vocab_file_path}")
@@ -469,7 +540,7 @@ def train_and_profile_cli():
     try:
         with open(merges_file_path, "w", encoding="utf-8") as f:
             for p1, p2 in tokenizer.merges:
-                f.write(f"{p1.decode('latin-1')} {p2.decode('latin-1')}\n")
+                f.write(f"{p1.decode('utf-8')} {p2.decode('utf-8')}\n")
         print(f"   Merges saved to {merges_file_path}")
     except Exception as e:
         print(f"   Error saving merges file: {e}")
