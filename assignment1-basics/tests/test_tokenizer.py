@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import os
-import resource
+# import resource
+import psutil
 import sys
 
 import psutil
@@ -20,16 +21,24 @@ def memory_limit(max_mem):
     def decorator(f):
         def wrapper(*args, **kwargs):
             process = psutil.Process(os.getpid())
-            prev_limits = resource.getrlimit(resource.RLIMIT_AS)
-            resource.setrlimit(resource.RLIMIT_AS, (process.memory_info().rss + max_mem, -1))
+            # prev_limits = resource.getrlimit(resource.RLIMIT_AS)
+            # resource.setrlimit(resource.RLIMIT_AS, (process.memory_info().rss + max_mem, -1))
+            initial_memory = process.memory_info().rss
             try:
                 result = f(*args, **kwargs)
+                current_memory = process.memory_info().rss
+                memory_used = current_memory - initial_memory
+                
+                if memory_used > max_mem:
+                    raise MemoryError(f"Memory usage exceeded limit: {memory_used} > {max_mem}")
                 return result
-            finally:
+            except Exception as e:
+                raise e
+            # finally:
                 # Even if the function above fails (e.g., it exceeds the
                 # memory limit), reset the memory limit back to the
                 # previous limit so other tests aren't affected.
-                resource.setrlimit(resource.RLIMIT_AS, prev_limits)
+                # resource.setrlimit(resource.RLIMIT_AS, prev_limits)
 
         return wrapper
 
