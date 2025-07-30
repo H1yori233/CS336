@@ -439,7 +439,7 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    
+
     from cs336_basics.nn_utils import TransformerLM
 
     transformer_lm = TransformerLM(
@@ -557,7 +557,10 @@ def run_cross_entropy(
     Returns:
         Float[Tensor, ""]: The average cross-entropy loss across examples.
     """
-    raise NotImplementedError
+
+    from cs336_basics.optimizer import cross_entropy
+
+    return cross_entropy(inputs, targets)
 
 
 def run_gradient_clipping(
@@ -571,14 +574,20 @@ def run_gradient_clipping(
 
     The gradients of the parameters (parameter.grad) should be modified in-place.
     """
-    raise NotImplementedError
+
+    from cs336_basics.optimizer import gradient_clipping
+
+    gradient_clipping(parameters, max_l2_norm)
 
 
 def get_adamw_cls() -> type[torch.optim.Optimizer]:
     """
     Returns a torch.optim.Optimizer that implements AdamW.
     """
-    raise NotImplementedError
+
+    from cs336_basics.optimizer import AdamW
+
+    return AdamW
 
 
 def run_get_lr_cosine_schedule(
@@ -606,7 +615,12 @@ def run_get_lr_cosine_schedule(
     Returns:
         Learning rate at the given iteration under the specified schedule.
     """
-    raise NotImplementedError
+
+    from cs336_basics.optimizer import lr_cosine_schedule
+
+    return lr_cosine_schedule(
+        it, max_learning_rate, min_learning_rate, warmup_iters, cosine_cycle_iters
+    )
 
 
 def run_save_checkpoint(
