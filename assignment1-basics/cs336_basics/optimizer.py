@@ -93,15 +93,15 @@ class AdamW(torch.optim.Optimizer):
                 p.data.mul_(1 - lr * weight_decay)  # Apply weight decay.
 
                 m.mul_(beta1).add_(
-                    grad, alpha=1 - beta1       # beta1 * m + (1 - beta1) * grad
+                    grad, alpha=1 - beta1  # beta1 * m + (1 - beta1) * grad
                 )  # Update the first moment estimate.
                 v.mul_(beta2).addcmul_(
-                    grad, grad, value=1 - beta2 # beta2 * v + (1 - beta2) * grad^2
+                    grad, grad, value=1 - beta2  # beta2 * v + (1 - beta2) * grad^2
                 )  # Update the second moment estimate.
                 lr_t = lr * math.sqrt(1 - beta2**t) / (1 - beta1**t)
-                
+
                 denom = torch.sqrt(v).add_(eps)
-                p.data.sub_(m.div(denom).mul(lr_t)) # Update weight tensor in-place.
+                p.data.sub_(m.div(denom).mul(lr_t))  # Update weight tensor in-place.
 
                 state["t"] = t
                 state["exp_avg"] = m

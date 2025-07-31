@@ -18,9 +18,13 @@ SPECIAL_TOKENS = ["<|endoftext|>"]
 # output file path
 base_name = os.path.splitext(os.path.basename(INPUT_FILE))[0]
 output_dir = os.path.dirname(INPUT_FILE)
-merges_output_path = os.path.join(output_dir, f"{base_name}-vocab_size_{VOCAB_SIZE}-merges.txt")
-vocab_output_path = os.path.join(output_dir, f"{base_name}-vocab_size_{VOCAB_SIZE}-vocab.json")
-tokenizer_json_path = "bpe_tokenizer.json" # temporary file
+merges_output_path = os.path.join(
+    output_dir, f"{base_name}-vocab_size_{VOCAB_SIZE}-merges.txt"
+)
+vocab_output_path = os.path.join(
+    output_dir, f"{base_name}-vocab_size_{VOCAB_SIZE}-vocab.json"
+)
+tokenizer_json_path = "bpe_tokenizer.json"  # temporary file
 
 # --- Training tokenizer ---
 start_time = time.time()
