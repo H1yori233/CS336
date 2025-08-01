@@ -1,0 +1,178 @@
+Loading tokenizers...
+
+Tokenizers loaded successfully.
+
+
+--- SAMPLING DOCUMENTS ---
+
+Sampling 10 documents from TinyStoriesV2-GPT4-train.txt...
+
+Sampled 6 documents.
+
+Sampling 10 documents from owt_train.txt...
+
+Sampled 10 documents.
+
+
+--- ENCODING SAMPLES ---
+
+
+TinyStories samples w/ TinyStories tokenizer:
+
+  Doc 1: 307 chars -> 136 tokens
+
+    Decoded: "Maybe one day he will let us ride in the fire truck. That would be fun," Mia says.
+Tim agrees. He thinks that...
+
+  Doc 2: 810 chars -> 354 tokens
+
+    Decoded: Lily smiled and said, "Thank you, Tom. You're a good brother. And I'm not stubborn anymore. I'm smart and ...
+
+  Doc 3: 380 chars -> 166 tokens
+
+    Decoded: When he was done, the pilot felt full and happy. But as he flew away, he heard a small voice say: "Wait! ...
+
+
+OpenWebText samples w/ OpenWebText tokenizer:
+
+  Doc 1: 2625 chars -> 1045 tokens
+
+    Decoded: It's no wonder that Barber's convention speech covered everything from wages and labor conditions to guns, homeland security, LGBTQ rights and...
+
+  Doc 2: 4095 chars -> 1645 tokens
+
+    Decoded: Advertisement
+
+Those who have been closely following the remarkable liberalization of gun laws over the past three decades might well roll their eyes at ...
+
+  Doc 3: 1694 chars -> 719 tokens
+
+    Decoded: What Belfort did so well after catching Henderson with the initial counter uppercut and putting him down, was to wait until Henderson stood...
+
+
+--- CROSS-TOKENIZATION ANALYSIS ---
+
+Tokenizing OpenWebText samples with both tokenizers:
+
+  Doc 1:
+
+    TinyTokenizer: 1186 tokens
+
+    OWTTokenizer:  1045 tokens
+
+    Compression Ratio (OWT/Tiny): 0.881
+
+  Doc 2:
+
+    TinyTokenizer: 1951 tokens
+
+    OWTTokenizer:  1645 tokens
+
+    Compression Ratio (OWT/Tiny): 0.843
+
+  Doc 3:
+
+    TinyTokenizer: 772 tokens
+
+    OWTTokenizer:  719 tokens
+
+    Compression Ratio (OWT/Tiny): 0.931
+
+  Doc 4:
+
+    TinyTokenizer: 1152 tokens
+
+    OWTTokenizer:  1033 tokens
+
+    Compression Ratio (OWT/Tiny): 0.897
+
+  Doc 5:
+
+    TinyTokenizer: 93 tokens
+
+    OWTTokenizer:  87 tokens
+
+    Compression Ratio (OWT/Tiny): 0.935
+
+
+Overall Stats (first 5 OWT docs):
+
+  Total Chars: 11226
+
+  Total Tokens (TinyTokenizer): 5154
+
+  Total Tokens (OWTTokenizer):  4529
+
+  Overall Compression Ratio: 0.879
+
+
+--- THROUGHPUT ESTIMATION ---
+
+
+TinyStories Tokenizer Performance:
+
+  27,950 chars in 0.069s
+
+  Throughput: 0.39 MB/s (176,154 tokens/s)
+
+
+OpenWebText Tokenizer Performance:
+
+  294,900 chars in 5.464s
+
+  Throughput: 0.05 MB/s (23,956 tokens/s)
+
+
+--- PILE DATASET ESTIMATION ---
+
+
+Estimating for TinyStories tokenizer:
+
+  Est. time for The Pile (825GB): 605.8 hours (25.2 days)
+
+
+Estimating for OpenWebText tokenizer:
+
+  Est. time for The Pile (825GB): 4558.9 hours (190.0 days)
+
+
+--- ENCODING FULL DATASETS ---
+
+
+Encoding TinyStories Valid from TinyStoriesV2-GPT4-valid.txt...
+
+  Finished: 9,802,016 tokens in 37.96s.
+
+  Saved to data/encoded/tiny_valid_tokens.npy.
+
+  Array info: shape=(9802016,), dtype=uint16.
+
+
+Encoding OpenWebText Valid from owt_valid.txt...
+
+  Finished: 119,624,841 tokens in 722.31s.
+
+  Saved to data/encoded/owt_valid_tokens.npy.
+
+  Array info: shape=(119624841,), dtype=uint16.
+
+
+--- SUMMARY ---
+
+
+Dataset Encoding Summary:
+
+  TinyStories Valid: 9,802,016 tokens
+
+  OpenWebText Valid: 119,624,841 tokens
+
+
+File Verification:
+
+  tiny_valid_tokens.npy: shape=(9802016,), dtype=uint16, size=18.7MB
+
+  owt_valid_tokens.npy: shape=(119624841,), dtype=uint16, size=228.2MB
+
+
+Script finished.
+

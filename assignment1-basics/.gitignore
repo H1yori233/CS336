@@ -165,3 +165,4 @@ data/TinyStoriesV2-GPT4-train.txt
 data/TinyStoriesV2-GPT4-valid.txt
 data/owt_train.txt
 data/owt_valid.txt
+*.npy

@@ -5,319 +5,262 @@ import random
 import numpy as np
 from cs336_basics.tokenizer import BPETokenizer
 
+# --- Configuration ---
+# Paths for OpenWebText data
 owt_train_path = "data/owt_train.txt"
 owt_valid_path = "data/owt_valid.txt"
 owt_vocab_path = "data/owt_train-vocab_size_32000-vocab.json"
 owt_merges_path = "data/owt_train-vocab_size_32000-merges.txt"
 
+# Paths for TinyStories data
 tiny_train_path = "data/TinyStoriesV2-GPT4-train.txt"
 tiny_valid_path = "data/TinyStoriesV2-GPT4-valid.txt"
 tiny_vocab_path = "data/TinyStoriesV2-GPT4-train-vocab_size_10000-vocab.json"
 tiny_merges_path = "data/TinyStoriesV2-GPT4-train-vocab_size_10000-merges.txt"
 
+# --- Output File Setup ---
+# All print output will be redirected to this file.
+output_dir = "data"
+os.makedirs(output_dir, exist_ok=True)
+output_filepath = os.path.join(output_dir, "compare_result.txt")
 try:
-    owt_tokenizer = BPETokenizer.from_files(owt_vocab_path, owt_merges_path)
-    tiny_tokenizer = BPETokenizer.from_files(tiny_vocab_path, tiny_merges_path)
-except Exception as e:
-    print(f"Error loading tokenizers: {e}")
+    f_out = open(output_filepath, "w", encoding="utf-8")
+except IOError as e:
+    print(f"Fatal: Could not open output file {output_filepath}. Error: {e}")
     sys.exit(1)
 
+def log(message=""):
+    print(message)
+    f_out.write(message + "\n")
+
+# --- Tokenizer Loading ---
+try:
+    log("Loading tokenizers...\n")
+    owt_tokenizer = BPETokenizer.from_files(
+        owt_vocab_path, owt_merges_path, special_tokens=["<|endoftext|>"]
+    )
+    tiny_tokenizer = BPETokenizer.from_files(
+        tiny_vocab_path, tiny_merges_path, special_tokens=["<|endoftext|>"]
+    )
+    log("Tokenizers loaded successfully.\n")
+except Exception as e:
+    log(f"Error loading tokenizers: {e}\n")
+    f_out.close()
+    sys.exit(1)
+
+
 def sample_documents(file_path, num_docs=10, doc_separator="\n\n"):
-    """Sample random documents from a text file without loading entire file into memory."""
-    print(f"Sampling {num_docs} documents from {file_path}")
-    
-    # First pass: count total documents
+    """Sample documents randomly without loading the whole file."""
+    log(
+        f"Sampling {num_docs} documents from {os.path.basename(file_path)}...\n"
+    )
     document_positions = []
-    current_pos = 0
-    buffer_size = 1024 * 1024  # 1MB buffer
-    leftover = ""
-    
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-        while True:
-            chunk = f.read(buffer_size)
-            if not chunk:
-                break
-            
-            # Combine with leftover from previous chunk
-            text = leftover + chunk
-            
-            # Find document boundaries
-            parts = text.split(doc_separator)
-            
-            # Process all complete documents (all but the last part)
-            for i in range(len(parts) - 1):
-                if parts[i].strip():  # Skip empty documents
-                    document_positions.append(current_pos)
-                current_pos += len(parts[i]) + len(doc_separator)
-            
-            # Keep the last part as leftover for next iteration
-            leftover = parts[-1]
-            current_pos += len(leftover)
-    
-    # Handle the final leftover if it's a valid document
-    if leftover.strip():
-        document_positions.append(current_pos - len(leftover))
-    
-    print(f"Found {len(document_positions)} documents")
-    
-    if len(document_positions) == 0:
-        print("No documents found!")
-        return []
-    
-    # Sample random document positions
-    num_to_sample = min(num_docs, len(document_positions))
-    sampled_positions = random.sample(document_positions, num_to_sample)
-    
-    # Read the sampled documents
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        f.seek(0, 2)
+        file_size = f.tell()
+        f.seek(0)
+        while (
+            len(document_positions) < num_docs * 5
+        ):  # Sample more to ensure we get enough valid ones
+            random_pos = random.randint(0, file_size)
+            f.seek(random_pos)
+            f.readline()  # Align to next line
+            pos = f.tell()
+            if pos < file_size:
+                document_positions.append(pos)
+
+    sampled_positions = random.sample(
+        list(set(document_positions)), min(num_docs, len(document_positions))
+    )
+
     documents = []
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
         for pos in sorted(sampled_positions):
             f.seek(pos)
-            # Read until we find the document separator or EOF
-            doc_text = ""
-            while True:
-                char = f.read(1)
-                if not char:  # EOF
-                    break
-                doc_text += char
-                if doc_text.endswith(doc_separator):
-                    doc_text = doc_text[:-len(doc_separator)]
-                    break
-            
-            if doc_text.strip():
-                documents.append(doc_text.strip())
-    
-    print(f"Successfully sampled {len(documents)} documents")
+            text = f.read(4096)  # Read a chunk
+            doc = text.split(doc_separator)[0]
+            if doc.strip():
+                documents.append(doc.strip())
+
+    log(f"Sampled {len(documents)} documents.\n")
     return documents
 
-# Sample 10 documents from TinyStories and OpenWebText
-print("=" * 60)
-print("SAMPLING DOCUMENTS")
-print("=" * 60)
 
-tiny_samples = sample_documents(tiny_train_path, 10)
-# owt_samples = sample_documents(owt_train_path, 10)
+# --- Document Sampling ---
+log("\n--- SAMPLING DOCUMENTS ---\n")
+tiny_samples = sample_documents(tiny_train_path, 10, doc_separator="<|endoftext|>")
+owt_samples = sample_documents(owt_train_path, 10, doc_separator="<|endoftext|>")
 
-print(f"TinyStories samples: {len(tiny_samples)} documents")
-# print(f"OpenWebText samples: {len(owt_samples)} documents")
+# --- Encoding Sampled Documents ---
+log("\n--- ENCODING SAMPLES ---\n")
 
-# Using trained tokenizer to encode these sampled documents into integer IDs
-print("\n" + "=" * 60)
-print("ENCODING SAMPLED DOCUMENTS")
-print("=" * 60)
-
-print("\nTinyStories samples with TinyStories tokenizer:")
-for i, doc in enumerate(tiny_samples[:3]):  # Show first 3 for brevity
+log("\nTinyStories samples w/ TinyStories tokenizer:\n")
+for i, doc in enumerate(tiny_samples[:3]):
     tokens = tiny_tokenizer.encode(doc)
-    print(f"Document {i+1} ({len(doc)} chars -> {len(tokens)} tokens):")
-    print(f"  First 20 tokens: {tokens[:20]}")
-    print(f"  Decoded: {tiny_tokenizer.decode(tokens[:50])}...")
-    print()
+    log(f"  Doc {i+1}: {len(doc)} chars -> {len(tokens)} tokens\n")
+    log(f"    Decoded: {tiny_tokenizer.decode(tokens[:50])}...\n")
 
-# print("\nOpenWebText samples with OpenWebText tokenizer:")
-# for i, doc in enumerate(owt_samples[:3]):  # Show first 3 for brevity
-#     tokens = owt_tokenizer.encode(doc)
-#     print(f"Document {i+1} ({len(doc)} chars -> {len(tokens)} tokens):")
-#     print(f"  First 20 tokens: {tokens[:20]}")
-#     print(f"  Decoded: {owt_tokenizer.decode(tokens[:50])}...")
-#     print()
+log("\nOpenWebText samples w/ OpenWebText tokenizer:\n")
+for i, doc in enumerate(owt_samples[:3]):
+    tokens = owt_tokenizer.encode(doc)
+    log(f"  Doc {i+1}: {len(doc)} chars -> {len(tokens)} tokens\n")
+    log(f"    Decoded: {owt_tokenizer.decode(tokens[:50])}...\n")
 
-# # Tokenize OpenWebText sample with the TinyStories tokenizer
-# print("\n" + "=" * 60)
-# print("CROSS-TOKENIZATION ANALYSIS")
-# print("=" * 60)
+# --- Cross-Tokenization Analysis ---
+log("\n--- CROSS-TOKENIZATION ANALYSIS ---\n")
+log("Tokenizing OpenWebText samples with both tokenizers:\n")
+owt_with_tiny_tokens = []
+owt_with_owt_tokens = []
 
-# print("\nOpenWebText samples with TinyStories tokenizer:")
-# owt_with_tiny_tokens = []
-# owt_with_owt_tokens = []
+for i, doc in enumerate(owt_samples[:5]):
+    tiny_tokens = tiny_tokenizer.encode(doc)
+    owt_tokens = owt_tokenizer.encode(doc)
+    owt_with_tiny_tokens.extend(tiny_tokens)
+    owt_with_owt_tokens.extend(owt_tokens)
 
-# for i, doc in enumerate(owt_samples[:5]):  # Analyze first 5 documents
-#     tiny_tokens = tiny_tokenizer.encode(doc)
-#     owt_tokens = owt_tokenizer.encode(doc)
+    log(f"  Doc {i+1}:\n")
+    log(f"    TinyTokenizer: {len(tiny_tokens)} tokens\n")
+    log(f"    OWTTokenizer:  {len(owt_tokens)} tokens\n")
+    if len(tiny_tokens) > 0:
+        log(
+            f"    Compression Ratio (OWT/Tiny): {len(owt_tokens)/len(tiny_tokens):.3f}\n"
+        )
+
+log("\nOverall Stats (first 5 OWT docs):\n")
+log(f"  Total Chars: {sum(len(doc) for doc in owt_samples[:5])}\n")
+log(f"  Total Tokens (TinyTokenizer): {len(owt_with_tiny_tokens)}\n")
+log(f"  Total Tokens (OWTTokenizer):  {len(owt_with_owt_tokens)}\n")
+if len(owt_with_tiny_tokens) > 0:
+    log(
+        f"  Overall Compression Ratio: {len(owt_with_owt_tokens)/len(owt_with_tiny_tokens):.3f}\n"
+    )
+
+# --- Throughput Estimation ---
+log("\n--- THROUGHPUT ESTIMATION ---\n")
+
+
+def estimate_throughput(tokenizer, sample_text, tokenizer_name):
+    """Estimate tokenizer throughput."""
+    test_text = sample_text * 10
+
+    tokenizer.encode(test_text[:1000])  # Warm-up
+
+    start_time = time.time()
+    tokens = tokenizer.encode(test_text)
+    end_time = time.time()
+
+    elapsed_time = end_time - start_time
+    if elapsed_time == 0:
+        elapsed_time = 1e-9
+    chars_processed = len(test_text)
+    mb_per_sec = chars_processed / (1024 * 1024) / elapsed_time
+    tokens_per_sec = len(tokens) / elapsed_time
+
+    log(f"\n{tokenizer_name} Tokenizer Performance:\n")
+    log(f"  {chars_processed:,} chars in {elapsed_time:.3f}s\n")
+    log(
+        f"  Throughput: {mb_per_sec:.2f} MB/s ({tokens_per_sec:,.0f} tokens/s)\n"
+    )
+    return mb_per_sec
+
+
+tiny_sample_text = "".join(tiny_samples)
+owt_sample_text = "".join(owt_samples)
+
+tiny_mb_sec = estimate_throughput(tiny_tokenizer, tiny_sample_text, "TinyStories")
+owt_mb_sec = estimate_throughput(owt_tokenizer, owt_sample_text, "OpenWebText")
+
+# --- Pile Dataset Estimation ---
+log(f"\n--- PILE DATASET ESTIMATION ---\n")
+pile_size_gb = 825
+pile_size_mb = pile_size_gb * 1024
+
+for name, mb_per_sec in [("TinyStories", tiny_mb_sec), ("OpenWebText", owt_mb_sec)]:
+    if mb_per_sec > 0:
+        time_seconds = pile_size_mb / mb_per_sec
+        time_hours = time_seconds / 3600
+        time_days = time_hours / 24
+        log(f"\nEstimating for {name} tokenizer:\n")
+        log(
+            f"  Est. time for The Pile (825GB): {time_hours:.1f} hours ({time_days:.1f} days)\n"
+        )
+
+# --- Encoding Full Datasets ---
+log("\n--- ENCODING FULL DATASETS ---\n")
+
+
+def encode_and_save_dataset(file_path, tokenizer, output_path, dataset_name):
+    """Encode and save a dataset using streaming with encode_iterable."""
+    log(f"\nEncoding {dataset_name} from {os.path.basename(file_path)}...\n")
+    start_time = time.time()
     
-#     owt_with_tiny_tokens.extend(tiny_tokens)
-#     owt_with_owt_tokens.extend(owt_tokens)
+    tokens = []
+    line_count = 0
     
-#     print(f"Document {i+1}:")
-#     print(f"  With TinyStories tokenizer: {len(tiny_tokens)} tokens")
-#     print(f"  With OpenWebText tokenizer: {len(owt_tokens)} tokens")
-#     print(f"  Compression ratio: {len(owt_tokens)/len(tiny_tokens):.3f}")
-#     print()
-
-# total_chars = sum(len(doc) for doc in owt_samples[:5])
-# print(f"Total characters: {total_chars}")
-# print(f"Total tokens (TinyStories tokenizer): {len(owt_with_tiny_tokens)}")
-# print(f"Total tokens (OpenWebText tokenizer): {len(owt_with_owt_tokens)}")
-# print(f"Overall compression ratio: {len(owt_with_owt_tokens)/len(owt_with_tiny_tokens):.3f}")
-
-# # Estimate the throughput of your tokenizer
-# print("\n" + "=" * 60)
-# print("THROUGHPUT ESTIMATION")
-# print("=" * 60)
-
-# def estimate_throughput(tokenizer, sample_text, tokenizer_name):
-#     """Estimate tokenization throughput."""
-#     # Use a reasonably sized sample for timing
-#     test_text = sample_text * 100  # Repeat to get a substantial test
-    
-#     # Warm up
-#     tokenizer.encode(test_text[:1000])
-    
-#     # Time the encoding
-#     start_time = time.time()
-#     tokens = tokenizer.encode(test_text)
-#     end_time = time.time()
-    
-#     elapsed_time = end_time - start_time
-#     chars_processed = len(test_text)
-#     tokens_generated = len(tokens)
-    
-#     chars_per_sec = chars_processed / elapsed_time
-#     tokens_per_sec = tokens_generated / elapsed_time
-#     mb_per_sec = chars_processed / (1024 * 1024) / elapsed_time
-    
-#     print(f"\n{tokenizer_name} Tokenizer Performance:")
-#     print(f"  Processed {chars_processed:,} characters in {elapsed_time:.3f} seconds")
-#     print(f"  Generated {tokens_generated:,} tokens")
-#     print(f"  Throughput: {chars_per_sec:,.0f} chars/sec, {tokens_per_sec:,.0f} tokens/sec")
-#     print(f"  Throughput: {mb_per_sec:.2f} MB/sec")
-    
-#     return chars_per_sec, tokens_per_sec, mb_per_sec
-
-# # Test with both tokenizers
-# tiny_sample_text = "\n".join(tiny_samples)
-# owt_sample_text = "\n".join(owt_samples)
-
-# tiny_throughput = estimate_throughput(tiny_tokenizer, tiny_sample_text, "TinyStories")
-# owt_throughput = estimate_throughput(owt_tokenizer, owt_sample_text, "OpenWebText")
-
-# # Estimate time for The Pile dataset (825GB)
-# pile_size_gb = 825
-# pile_size_bytes = pile_size_gb * 1024 * 1024 * 1024
-# pile_size_chars = pile_size_bytes  # Assuming roughly 1 byte per character
-
-# print(f"\n" + "=" * 60)
-# print("THE PILE DATASET ESTIMATION")
-# print("=" * 60)
-
-# for name, (chars_per_sec, tokens_per_sec, mb_per_sec) in [
-#     ("TinyStories", tiny_throughput),
-#     ("OpenWebText", owt_throughput)
-# ]:
-#     time_seconds = pile_size_chars / chars_per_sec
-#     time_hours = time_seconds / 3600
-#     time_days = time_hours / 24
-    
-#     print(f"\nWith {name} tokenizer:")
-#     print(f"  Estimated time to tokenize The Pile (825GB): {time_hours:.1f} hours ({time_days:.1f} days)")
-
-# # Encode training and development datasets and serialize as NumPy arrays
-# print("\n" + "=" * 60)
-# print("ENCODING FULL DATASETS")
-# print("=" * 60)
-
-# def encode_and_save_dataset(file_path, tokenizer, output_path, dataset_name):
-#     """Encode a dataset and save as uint16 numpy array."""
-#     print(f"\nEncoding {dataset_name} from {file_path}")
-    
-#     start_time = time.time()
-#     all_tokens = []
-    
-#     # Process file in chunks to handle large files
-#     chunk_size = 1024 * 1024  # 1MB chunks
-    
-#     with open(file_path, 'r', encoding='utf-8') as f:
-#         chunk_num = 0
-#         while True:
-#             chunk = f.read(chunk_size)
-#             if not chunk:
-#                 break
+    with open(file_path, "r", encoding="utf-8") as f:
+        # Use encode_iterable for memory-efficient processing
+        for token_id in tokenizer.encode_iterable(f):
+            tokens.append(token_id)
             
-#             tokens = tokenizer.encode(chunk)
-#             all_tokens.extend(tokens)
-#             chunk_num += 1
-            
-#             if chunk_num % 100 == 0:
-#                 print(f"  Processed {chunk_num} chunks, {len(all_tokens):,} tokens so far")
+            # Log progress periodically
+            if len(tokens) % 1000000 == 0:
+                log(f"  Progress: {len(tokens)//10000}k tokens processed...")
     
-#     # Convert to numpy array with uint16 dtype
-#     # Check if any token IDs exceed uint16 range
-#     max_token_id = max(all_tokens) if all_tokens else 0
-#     if max_token_id >= 65536:
-#         print(f"  Warning: Max token ID {max_token_id} exceeds uint16 range, using uint32")
-#         tokens_array = np.array(all_tokens, dtype=np.uint32)
-#     else:
-#         tokens_array = np.array(all_tokens, dtype=np.uint16)
-    
-#     # Save the array
-#     np.save(output_path, tokens_array)
-    
-#     end_time = time.time()
-#     elapsed_time = end_time - start_time
-    
-#     print(f"  Encoded {len(all_tokens):,} tokens in {elapsed_time:.2f} seconds")
-#     print(f"  Saved to {output_path}")
-#     print(f"  Array shape: {tokens_array.shape}, dtype: {tokens_array.dtype}")
-    
-#     return len(all_tokens)
+    # Convert to numpy array
+    max_token_id = max(tokens) if tokens else 0
+    dtype = np.uint16 if max_token_id < 65536 else np.uint32
+    tokens_array = np.array(tokens, dtype=dtype)
 
-# # Create output directory
-# os.makedirs("data/encoded", exist_ok=True)
+    np.save(output_path, tokens_array)
+    end_time = time.time()
 
-# # Encode TinyStories datasets
-# tiny_train_tokens = encode_and_save_dataset(
-#     tiny_train_path, 
-#     tiny_tokenizer, 
-#     "data/encoded/tiny_train_tokens.npy",
-#     "TinyStories Train"
-# )
+    log(f"  Finished: {len(tokens):,} tokens in {end_time - start_time:.2f}s.\n")
+    log(f"  Saved to {output_path}.\n")
+    log(f"  Array info: shape={tokens_array.shape}, dtype={tokens_array.dtype}.\n")
+    return len(tokens)
 
-# tiny_valid_tokens = encode_and_save_dataset(
-#     tiny_valid_path, 
-#     tiny_tokenizer, 
-#     "data/encoded/tiny_valid_tokens.npy",
-#     "TinyStories Valid"
-# )
 
-# # Encode OpenWebText datasets
-# owt_train_tokens = encode_and_save_dataset(
-#     owt_train_path, 
-#     owt_tokenizer, 
-#     "data/encoded/owt_train_tokens.npy",
-#     "OpenWebText Train"
-# )
+os.makedirs("data/encoded", exist_ok=True)
 
-# owt_valid_tokens = encode_and_save_dataset(
-#     owt_valid_path, 
-#     owt_tokenizer, 
-#     "data/encoded/owt_valid_tokens.npy",
-#     "OpenWebText Valid"
-# )
+# Only encode validation sets to avoid memory issues with large training sets
+datasets_to_encode = [
+    (
+        tiny_valid_path,
+        tiny_tokenizer,
+        "data/encoded/tiny_valid_tokens.npy",
+        "TinyStories Valid",
+    ),
+    (
+        owt_valid_path,
+        owt_tokenizer,
+        "data/encoded/owt_valid_tokens.npy",
+        "OpenWebText Valid",
+    ),
+]
 
-# # Summary
-# print("\n" + "=" * 60)
-# print("SUMMARY")
-# print("=" * 60)
+encoded_tokens = {}
+for path, tokenizer, out_path, name in datasets_to_encode:
+    encoded_tokens[name] = encode_and_save_dataset(path, tokenizer, out_path, name)
 
-# print(f"\nDataset encoding completed:")
-# print(f"  TinyStories Train: {tiny_train_tokens:,} tokens")
-# print(f"  TinyStories Valid: {tiny_valid_tokens:,} tokens")
-# print(f"  OpenWebText Train: {owt_train_tokens:,} tokens")
-# print(f"  OpenWebText Valid: {owt_valid_tokens:,} tokens")
+# --- Summary and Verification ---
+log("\n--- SUMMARY ---\n")
+log("\nDataset Encoding Summary:\n")
+for name, count in encoded_tokens.items():
+    log(f"  {name}: {count:,} tokens\n")
 
-# print(f"\nEncoded files saved to data/encoded/ directory")
-# print(f"All arrays use uint16 dtype (or uint32 if token IDs exceed 65535)")
+log("\nFile Verification:\n")
+for _, _, filename, _ in datasets_to_encode:
+    filepath = filename
+    if os.path.exists(filepath):
+        arr = np.load(filepath)
+        file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
+        log(
+            f"  {os.path.basename(filepath)}: shape={arr.shape}, dtype={arr.dtype}, size={file_size_mb:.1f}MB\n"
+        )
+    else:
+        log(f"  {os.path.basename(filepath)}: NOT FOUND!\n")
 
-# # Verify the saved files
-# print(f"\nVerifying saved files:")
-# for filename in ["tiny_train_tokens.npy", "tiny_valid_tokens.npy", 
-#                  "owt_train_tokens.npy", "owt_valid_tokens.npy"]:
-#     filepath = f"data/encoded/{filename}"
-#     if os.path.exists(filepath):
-#         arr = np.load(filepath)
-#         file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
-#         print(f"  {filename}: {arr.shape} {arr.dtype}, {file_size_mb:.1f} MB")
-#     else:
-#         print(f"  {filename}: File not found!")
+log("\nScript finished.\n")
+f_out.close()
 
-# print("\nScript completed successfully!")
+print(f"Comparison results saved to {output_filepath}")

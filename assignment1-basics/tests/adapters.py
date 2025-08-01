@@ -29,7 +29,7 @@ def run_linear(
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
 
-    from cs336_basics.nn_utils import Linear
+    from cs336_basics.layers import Linear
 
     linear = Linear(d_in, d_out, device=weights.device, dtype=weights.dtype)
     linear.load_state_dict({"weight": weights})  # update nn.Parameter
@@ -55,7 +55,7 @@ def run_embedding(
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
 
-    from cs336_basics.nn_utils import Embedding
+    from cs336_basics.layers import Embedding
 
     embedding = Embedding(
         vocab_size, d_model, device=weights.device, dtype=weights.dtype
@@ -94,7 +94,7 @@ def run_swiglu(
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
 
-    from cs336_basics.nn_utils import SwiGLU
+    from cs336_basics.layers import SwiGLU
 
     swiglu = SwiGLU(d_model, d_ff, device=w1_weight.device, dtype=w1_weight.dtype)
     swiglu.load_state_dict(
@@ -126,7 +126,7 @@ def run_scaled_dot_product_attention(
         Float[Tensor, " ... queries d_v"]: Output of SDPA
     """
 
-    from cs336_basics.nn_utils import scaled_dot_product_attention
+    from cs336_basics.layers import scaled_dot_product_attention
 
     return scaled_dot_product_attention(Q, K, V, mask)
 
@@ -163,7 +163,7 @@ def run_multihead_self_attention(
         implementation with the given QKV projection weights and input features.
     """
 
-    from cs336_basics.nn_utils import MultiheadSelfAttention
+    from cs336_basics.layers import MultiheadSelfAttention
 
     multihead_self_attention = MultiheadSelfAttention(
         d_model, num_heads, device=q_proj_weight.device, dtype=q_proj_weight.dtype
@@ -173,7 +173,7 @@ def run_multihead_self_attention(
             "q_proj.weight": q_proj_weight,
             "k_proj.weight": k_proj_weight,
             "v_proj.weight": v_proj_weight,
-            "o_proj.weight": o_proj_weight,
+            "output_proj.weight": o_proj_weight,
         }
     )  # update nn.Parameter
     return multihead_self_attention(in_features)
@@ -217,7 +217,7 @@ def run_multihead_self_attention_with_rope(
         implementation with the given QKV projection weights and input features.
     """
 
-    from cs336_basics.nn_utils import RotaryPositionalEmbedding, MultiheadSelfAttention
+    from cs336_basics.layers import RotaryPositionalEmbedding, MultiheadSelfAttention
 
     # the RoPE embedding dimension must be the head embedding dimension (d_model // num_heads)
     rope = RotaryPositionalEmbedding(
@@ -235,7 +235,7 @@ def run_multihead_self_attention_with_rope(
             "q_proj.weight": q_proj_weight,
             "k_proj.weight": k_proj_weight,
             "v_proj.weight": v_proj_weight,
-            "o_proj.weight": o_proj_weight,
+            "output_proj.weight": o_proj_weight,
         }
     )  # update nn.Parameter
     return multihead_self_attention(in_features, token_positions)
@@ -261,7 +261,7 @@ def run_rope(
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
 
-    from cs336_basics.nn_utils import RotaryPositionalEmbedding
+    from cs336_basics.layers import RotaryPositionalEmbedding
 
     rope = RotaryPositionalEmbedding(
         theta, d_k, max_seq_len, device=in_query_or_key.device
@@ -340,7 +340,7 @@ def run_transformer_block(
         running the Transformer block on the input features while using RoPE.
     """
 
-    from cs336_basics.nn_utils import RotaryPositionalEmbedding, TransformerBlock
+    from cs336_basics.model import RotaryPositionalEmbedding, TransformerBlock
 
     rope = RotaryPositionalEmbedding(
         theta,
@@ -440,7 +440,7 @@ def run_transformer_lm(
         next-word distribution for each token.
     """
 
-    from cs336_basics.nn_utils import TransformerLM
+    from cs336_basics.model import TransformerLM
 
     transformer_lm = TransformerLM(
         vocab_size,
@@ -478,7 +478,7 @@ def run_rmsnorm(
         RMSNorm of the `in_features`.
     """
 
-    from cs336_basics.nn_utils import RMSNorm
+    from cs336_basics.layers import RMSNorm
 
     rmsnorm = RMSNorm(d_model, eps, device=weights.device, dtype=weights.dtype)
     rmsnorm.load_state_dict({"weight": weights})  # update nn.Parameter
@@ -496,7 +496,11 @@ def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
         Float[Tensor,"..."]: of with the same shape as `in_features` with the output of applying
         SiLU to each element.
     """
-    raise NotImplementedError
+
+    from cs336_basics.layers import SiLU
+
+    silu = SiLU()
+    return silu(in_features)
 
 
 def run_get_batch(
@@ -520,7 +524,7 @@ def run_get_batch(
         language modeling labels.
     """
 
-    from cs336_basics.train import get_batch
+    from cs336_basics.utils import get_batch
 
     return get_batch(dataset, batch_size, context_length, device)
 
@@ -539,7 +543,7 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
         softmax normalizing the specified `dim`.
     """
 
-    from cs336_basics.nn_utils import Softmax
+    from cs336_basics.layers import Softmax
 
     softmax = Softmax(dim)
     return softmax(in_features)
@@ -561,7 +565,7 @@ def run_cross_entropy(
         Float[Tensor, ""]: The average cross-entropy loss across examples.
     """
 
-    from cs336_basics.optimizer import cross_entropy
+    from cs336_basics.utils import cross_entropy
 
     return cross_entropy(inputs, targets)
 
@@ -578,7 +582,7 @@ def run_gradient_clipping(
     The gradients of the parameters (parameter.grad) should be modified in-place.
     """
 
-    from cs336_basics.optimizer import gradient_clipping
+    from cs336_basics.utils import gradient_clipping
 
     gradient_clipping(parameters, max_l2_norm)
 
@@ -619,7 +623,7 @@ def run_get_lr_cosine_schedule(
         Learning rate at the given iteration under the specified schedule.
     """
 
-    from cs336_basics.optimizer import lr_cosine_schedule
+    from cs336_basics.utils import lr_cosine_schedule
 
     return lr_cosine_schedule(
         it, max_learning_rate, min_learning_rate, warmup_iters, cosine_cycle_iters
@@ -643,7 +647,7 @@ def run_save_checkpoint(
         out (str | os.PathLike | BinaryIO | IO[bytes]): Path or file-like object to serialize the model, optimizer, and iteration to.
     """
 
-    from cs336_basics.train import save_checkpoint
+    from cs336_basics.utils import save_checkpoint
 
     save_checkpoint(model, optimizer, iteration, out)
 
@@ -667,7 +671,7 @@ def run_load_checkpoint(
         int: the previously-serialized number of iterations.
     """
 
-    from cs336_basics.train import load_checkpoint
+    from cs336_basics.utils import load_checkpoint
 
     return load_checkpoint(src, model, optimizer)
 

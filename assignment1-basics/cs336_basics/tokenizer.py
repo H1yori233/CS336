@@ -255,6 +255,34 @@ class BPETrainer:
         self.merge()
         return self.vocab, self.merges
 
+    def save(self, output_base_path: str):
+        """
+        Saves the trained vocabulary and merges to files.
+        The output filenames are derived from the output_base_path and vocab_size.
+        """
+
+        # save vocab
+        vocab_filepath = f"{output_base_path}-vocab_size_{self.vocab_size}-vocab.json"
+        inverted_vocab = {
+            v.decode("utf-8", errors="replace"): k for k, v in self.vocab.items()
+        }
+
+        import json
+
+        with open(vocab_filepath, "w", encoding="utf-8") as f:
+            json.dump(inverted_vocab, f, ensure_ascii=False, indent=2)
+        print(f"Vocabulary saved to: {vocab_filepath}")
+
+        # save merges
+        merges_filepath = f"{output_base_path}-vocab_size_{self.vocab_size}-merges.txt"
+        with open(merges_filepath, "w", encoding="utf-8") as f:
+            for p1, p2 in self.merges:
+                # Decode bytes to string for writing
+                f.write(
+                    f"{p1.decode('utf-8', errors='replace')} {p2.decode('utf-8', errors='replace')}\n"
+                )
+        print(f"Merges saved to: {merges_filepath}")
+
     # --- Helper Functions ---
 
     def allocate_id(self):
@@ -410,11 +438,20 @@ class BPETokenizer:
         import json
 
         with open(vocab_filepath, "r", encoding="utf-8") as f:
-            data = json.load(f)  # (tokens: count)
+            data = json.load(f)  # {token_str: token_id}
             vocab = {
                 int(token_id): token_str.encode("utf-8")
                 for token_str, token_id in data.items()
-            }  # (int, bytes)
+            }
+
+        # Ensure all 256 bytes are in vocabulary (add missing ones)
+        existing_bytes = set(vocab.values())
+        max_id = max(vocab.keys()) if vocab else -1
+        for byte_val in range(256):
+            byte_token = bytes([byte_val])
+            if byte_token not in existing_bytes:
+                max_id += 1
+                vocab[max_id] = byte_token
 
         merges = []
         with open(merges_filepath, "r", encoding="utf-8") as f:
@@ -448,9 +485,16 @@ class BPETokenizer:
             else:
                 for match in re.finditer(self.PAT, part):
                     token_str = match.group()
-                    tokens = self._apply_bpe(token_str.encode("utf-8"))
-                    token_ids = [self.byte_string_to_id[b] for b in tokens]
-                    ids.extend(token_ids)
+                    try:
+                        # tokens = self._apply_bpe(token_str.encode("utf-8"))
+                        token_bytes = token_str.encode("utf-8")
+                        tokens = self._apply_bpe(token_bytes)
+                        token_ids = [self.byte_string_to_id[b] for b in tokens]
+                        ids.extend(token_ids)
+                    except Exception as e:
+                        print(f"Error applying BPE to token: {token_str}")
+                        print(f"Error: {e}")
+                        raise e
         return ids
 
     def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
@@ -466,7 +510,6 @@ class BPETokenizer:
         Decode a sequence of token IDs into text
         """
         bytes_list = [self.vocab[id] for id in ids]
-        # using errors='replace' automatically replace malformed data with the replacement marker.
         return b"".join(bytes_list).decode("utf-8", errors="replace")
 
     # --- Helper Functions ---
@@ -475,36 +518,34 @@ class BPETokenizer:
     def get_pairs(parts: list[bytes]) -> set[tuple[bytes, bytes]]:
         return set(zip(parts, parts[1:]))
 
-    def _apply_bpe(self, tokens: list[bytes]) -> list[bytes]:
-        """Apply BPE merges to a list of byte tokens"""
+    def _apply_bpe(self, token_bytes: bytes) -> list[bytes]:
+        """Apply BPE merges to a bytes sequence using efficient algorithm"""
 
-        parts = [bytes([b]) for b in tokens]  # split tokens into single bytes
+        parts = [bytes([b]) for b in token_bytes]
         if len(parts) < 2:
             return parts
 
         while True:
-            pairs = self.get_pairs(parts)
-            if not pairs:
-                break
-            best_pair = min(
-                pairs, key=lambda pair: self.merge_ranks.get(pair, float("inf"))
-            )
-            if best_pair not in self.merges:
+            # Find the best pair to merge (lowest rank)
+            best_pair = None
+            best_rank = float("inf")
+            best_pos = -1
+            
+            for i in range(len(parts) - 1):
+                pair = (parts[i], parts[i + 1])
+                rank = self.merge_ranks.get(pair, float("inf"))
+                if rank < best_rank:
+                    best_rank = rank
+                    best_pair = pair
+                    best_pos = i
+            
+            if best_pair is None or best_rank == float("inf"):
                 break
 
-            p1, p2 = best_pair
-            new_parts = []
-            i = 0
-            while i < len(parts):
-                if parts[i] == p1 and i + 1 < len(parts) and parts[i + 1] == p2:
-                    new_parts.append(p1 + p2)
-                    i += 2
-                else:
-                    new_parts.append(parts[i])
-                    i += 1
-            parts = new_parts
-            if len(parts) == 1:
-                break
+            # Merge the best pair at the found position
+            left, right = best_pair
+            parts[best_pos] = left + right
+            parts.pop(best_pos + 1)
 
         return parts
 

@@ -7,19 +7,6 @@ import math
 import numpy as np
 
 
-def cross_entropy(
-    inputs: Float[Tensor, " batch_size vocab_size"], targets: Int[Tensor, " batch_size"]
-) -> Float[Tensor, ""]:
-    """
-    Compute the cross entropy loss.
-    """
-
-    max_logits = torch.max(inputs, dim=-1, keepdim=True)[0]
-    log_sum_exp = torch.log(torch.sum(torch.exp(inputs - max_logits), dim=-1))
-    selected = inputs[torch.arange(inputs.shape[0]), targets]
-    return torch.mean(log_sum_exp - selected + max_logits)
-
-
 class SGD(torch.optim.Optimizer):
     def __init__(self, params, lr=1e-3):
         if lr < 0:
@@ -108,38 +95,3 @@ class AdamW(torch.optim.Optimizer):
                 state["exp_avg_sq"] = v
 
         return loss
-
-
-def lr_cosine_schedule(t, alpha_max, alpha_min, T_w, T_c):
-    """
-    Return the learning rate according to the scheduler.
-    t:          int current iteration
-    alpha_max:  float maximum learning rate
-    alpha_min:  float minimum learning rate
-    T_w:        int warmup period
-    T_c:        int cosine decay period
-    """
-    if t < T_w:
-        return t / T_w * alpha_max
-    elif t < T_c:
-        return alpha_min + 0.5 * (1 + math.cos(math.pi * (t - T_w) / (T_c - T_w))) * (
-            alpha_max - alpha_min
-        )
-    else:
-        return alpha_min
-
-
-def gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float):
-    """
-    Given a set of parameters, clip their combined gradients to have l2 norm at most max_l2_norm.
-    """
-
-    grads = [p.grad for p in parameters if p is not None and p.grad is not None]
-    if len(grads) == 0:
-        return
-
-    l2_norm = torch.norm(torch.cat([g.reshape(-1) for g in grads]))
-    if l2_norm > max_l2_norm:
-        scale = max_l2_norm / (l2_norm + 1e-6)  # Add epsilon for numerical stability
-        for g in grads:
-            g.mul_(scale)
