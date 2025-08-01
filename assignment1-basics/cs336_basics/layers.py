@@ -124,6 +124,17 @@ class SiLU(torch.nn.Module):
         return x * torch.sigmoid(x)
 
 
+class FFNSiLU(torch.nn.Module):
+    def __init__(self, d_model, d_ff, device=None, dtype=None):
+        super().__init__()
+        self.w1 = Linear(d_model, d_ff, device=device, dtype=dtype)
+        self.w2 = Linear(d_ff, d_model, device=device, dtype=dtype)
+        self.silu = SiLU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.w2(self.silu(self.w1(x)))
+
+
 class SwiGLU(torch.nn.Module):
     def __init__(self, d_model, d_ff, device=None, dtype=None):
         """

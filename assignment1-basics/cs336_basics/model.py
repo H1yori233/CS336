@@ -7,7 +7,7 @@ from .layers import (
     Embedding,
     RMSNorm,
     SwiGLU,
-    SiLU,
+    FFNSiLU,
     RotaryPositionalEmbedding,
     MultiheadSelfAttention,
 )
@@ -48,6 +48,7 @@ class TransformerBlock(torch.nn.Module):
             d_model, num_heads, rope=rope, device=device, dtype=dtype
         )
         self.ffn = SwiGLU(d_model, d_ff, device=device, dtype=dtype)
+        # self.ffn = FFNSiLU(d_model, d_ff, device=device, dtype=dtype)
 
     def forward(
         self,
@@ -65,6 +66,16 @@ class TransformerBlock(torch.nn.Module):
 
         y = x + self.attn(self.ln1(x), token_positions)
         return y + self.ffn(self.ln2(y))
+
+        # remove RMSNorm and train
+        # y = x + self.attn(x, token_positions)
+        # return y + self.ffn(y)
+
+        # post-norm and train
+        # attn_output = self.attn(x, token_positions)
+        # z = self.ln1(x + attn_output)
+        # ffn_output = self.ffn(z)
+        # return self.ln2(z + ffn_output)
 
 
 class TransformerLM(torch.nn.Module):
@@ -107,6 +118,7 @@ class TransformerLM(torch.nn.Module):
         rope = RotaryPositionalEmbedding(
             rope_theta, d_model // num_heads, context_length, device=device
         )
+        # rope = None
 
         self.token_embeddings = Embedding(
             vocab_size, d_model, device=device, dtype=dtype
