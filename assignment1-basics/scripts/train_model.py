@@ -23,42 +23,53 @@ from cs336_basics.utils import (
 # -------------------------------------------------------------
 
 # -- Data and Checkpoint Paths --
-VOCAB_FILE = "data/TinyStoriesV2-GPT4-train-vocab_size_10000-vocab.json"
-MERGES_FILE = "data/TinyStoriesV2-GPT4-train-vocab_size_10000-merges.txt"
+# VOCAB_FILE = "data/TinyStoriesV2-GPT4-train-vocab_size_10000-vocab.json"
+# MERGES_FILE = "data/TinyStoriesV2-GPT4-train-vocab_size_10000-merges.txt"
+VOCAB_FILE = "data/owt_train-vocab_size_32000-vocab.json"
+MERGES_FILE = "data/owt_train-vocab_size_32000-merges.txt"
 
 # Raw text data
-RAW_TRAIN_DATA_PATH = "data/TinyStoriesV2-GPT4-train.txt"
-RAW_VAL_DATA_PATH = "data/TinyStoriesV2-GPT4-valid.txt"
+# RAW_TRAIN_DATA_PATH = "data/TinyStoriesV2-GPT4-train.txt"
+# RAW_VAL_DATA_PATH = "data/TinyStoriesV2-GPT4-valid.txt"
+RAW_TRAIN_DATA_PATH = "data/owt_train.txt"
+RAW_VAL_DATA_PATH = "data/owt_valid.txt"
 
 # Paths for tokenized binary files
-TOKENIZED_TRAIN_PATH = "data/train.bin"
-TOKENIZED_VAL_DATA_PATH = "data/valid.bin"
+# TOKENIZED_TRAIN_PATH = "data/train.bin"
+# TOKENIZED_VAL_DATA_PATH = "data/valid.bin"
+TOKENIZED_TRAIN_PATH = "data/owt_train.bin"
+TOKENIZED_VAL_DATA_PATH = "data/owt_valid.bin"
 
-CHECKPOINT_PATH = "data/checkpoint_model.pt"  # Directory will be created
+# CHECKPOINT_PATH = "data/_checkpoint_model.pt"
+CHECKPOINT_PATH = "data/owt_checkpoint_model.pt"
 LOG_FILE = "data/log.md"
 
 # -- Model Architecture --
-VOCAB_SIZE = 10163  # TinyStories vocab size
+# VOCAB_SIZE = 10163  # TinyStories vocab size
+VOCAB_SIZE = 32161  # OWT vocab size
 CONTEXT_LENGTH = 256  # Max sequence length
-D_MODEL = 512  # Model dimension
-NUM_LAYERS = 4  # Number of transformer blocks
+D_MODEL = 640  # Model dimension
+NUM_LAYERS = 6  # Number of transformer blocks
 NUM_HEADS = 16  # Number of attention heads
-D_FF = 1344  # Feed-forward dimension (~8/3 * d_model, multiple of 64)
+D_FF = 1664  # Feed-forward dimension (~2.6 * d_model, multiple of 64)
 ROPE_THETA = 10000.0  # RoPE theta parameter
 
 # -- Training Hyperparameters --
-BATCH_SIZE = 64  # Number of sequences per batch
-NUM_ITERATIONS = 5000  # Total training steps (32*5000*256=40M tokens)
-LR = 1e-3  # Maximum learning rate
-WARMUP_STEPS = 500  # Steps for linear learning rate warmup
-LR_DECAY_STEPS = 5000  # Steps for cosine decay
-MIN_LR = 3e-5  # Minimum learning rate after decay
-WEIGHT_DECAY = 0.1  # AdamW weight decay
-GRAD_CLIP = 1.0  # Gradient clipping value (0 to disable)
+BATCH_SIZE = (
+    96  # Number of sequences per batch (reduced for better speed/memory balance)
+)
+NUM_ITERATIONS = 8000  # Total training steps
+LR = 3e-4  # Maximum learning rate (reduced for stability)
+WARMUP_STEPS = 1000  # Steps for linear learning rate warmup (increased)
+LR_DECAY_STEPS = 8000  # Steps for cosine decay (fixed to match NUM_ITERATIONS)
+MIN_LR = 3e-6  # Minimum learning rate after decay (reduced)
+WEIGHT_DECAY = 0.01  # AdamW weight decay (reduced)
+GRAD_CLIP = 0.5  # Gradient clipping value (reduced for stability)
 
 # -- Logging and Evaluation --
 EVAL_INTERVAL = 250  # Evaluate validation loss every N steps
-NOTES = "TinyStories baseline: 4L/16H/512D, 40M tokens"
+# NOTES = "TinyStories baseline: 4L/16H/512D, 40M tokens"
+NOTES = "OpenWebText optimized: 6L/16H/640D, reduced LR, fixed schedule"
 
 # -------------------------------------------------------------
 
@@ -71,13 +82,18 @@ def log_experiment(
     config: Dict,
     notes: str,
 ):
-    """Appends the results of an experiment to a markdown log file."""
+    """Appends the results of an experiment to a markdown log file with comprehensive hyperparameters."""
     log_dir = os.path.dirname(log_file)
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
 
-    header = "| Run Timestamp | Best Val Loss | Best Step | Total Steps | Batch Size | d_model | Layers | Heads | LR | Notes |\n"
-    separator = "|---|---|---|---|---|---|---|---|---|---|\n"
+    # Extended header with more hyperparameters
+    header = (
+        "| Run Timestamp | Best Val Loss | Best Step | Total Steps | Batch Size | "
+        "d_model | Layers | Heads | d_ff | Context Len | LR | Min LR | Warmup Steps | "
+        "Weight Decay | Grad Clip | Notes |\n"
+    )
+    separator = "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
 
     if not os.path.exists(log_file):
         with open(log_file, "w") as f:
@@ -94,7 +110,13 @@ def log_experiment(
             f"| {config.get('d_model', 'N/A')} "
             f"| {config.get('num_layers', 'N/A')} "
             f"| {config.get('num_heads', 'N/A')} "
+            f"| {config.get('d_ff', 'N/A')} "
+            f"| {config.get('context_length', 'N/A')} "
             f"| {config.get('lr', 'N/A'):.1E} "
+            f"| {config.get('min_lr', 'N/A'):.1E} "
+            f"| {config.get('warmup_steps', 'N/A')} "
+            f"| {config.get('weight_decay', 'N/A'):.3f} "
+            f"| {config.get('grad_clip', 'N/A'):.1f} "
             f"| {notes} |\n"
         )
         f.write(log_entry)
@@ -131,14 +153,20 @@ def training_together(
     """
     start_run_time = time.time()
 
-    # Setup logging config
+    # Setup comprehensive logging config
     config = {
         "num_iterations": num_iterations,
         "batch_size": batch_size,
         "d_model": d_model,
         "num_layers": num_layers,
         "num_heads": num_heads,
+        "d_ff": d_ff,
+        "context_length": context_length,
         "lr": lr,
+        "min_lr": min_lr,
+        "warmup_steps": warmup_steps,
+        "weight_decay": weight_decay,
+        "grad_clip": grad_clip,
     }
 
     print("Loading datasets...")
@@ -381,10 +409,22 @@ if __name__ == "__main__":
     if CHECKPOINT_PATH:
         os.makedirs(os.path.dirname(CHECKPOINT_PATH), exist_ok=True)
 
+    # Calculate total parameters
     params_per_layer = 4 * D_MODEL**2 + 3 * D_MODEL * D_FF + 2 * D_MODEL
     total_params = NUM_LAYERS * params_per_layer + 2 * VOCAB_SIZE * D_MODEL + D_MODEL
     print(f"Model will have ~{total_params / 1e6:.2f}M parameters")
-    print("Learn rate: ", LR)
+    print(f"Training configuration:")
+    print(f"  - Learning rate: {LR:.1E}")
+    print(f"  - Warmup steps: {WARMUP_STEPS}")
+    print(f"  - LR decay steps: {LR_DECAY_STEPS}")
+    print(f"  - Min LR: {MIN_LR:.1E}")
+    print(f"  - Weight decay: {WEIGHT_DECAY}")
+    print(f"  - Gradient clipping: {GRAD_CLIP}")
+    print(f"  - Batch size: {BATCH_SIZE}")
+
+    # Calculate total tokens processed
+    total_tokens = BATCH_SIZE * NUM_ITERATIONS * CONTEXT_LENGTH
+    print(f"  - Total tokens: {total_tokens / 1e6:.1f}M")
 
     enable_compile = DEVICE == "cpu"
     if enable_compile:
