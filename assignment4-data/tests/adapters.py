@@ -4,25 +4,34 @@ import os
 from typing import Any
 
 
-
 def run_extract_text_from_html_bytes(html_bytes: bytes) -> str | None:
-    raise NotImplementedError
+    from cs336_data.filter import extract_text_from_html_bytes
+
+    return extract_text_from_html_bytes(html_bytes)
 
 
 def run_identify_language(text: str) -> tuple[Any, float]:
-    raise NotImplementedError
+    from cs336_data.filter import identify_language
+
+    return identify_language(text)
 
 
 def run_mask_emails(text: str) -> tuple[str, int]:
-    raise NotImplementedError
+    from cs336_data.filter import mask_emails
+
+    return mask_emails(text)
 
 
 def run_mask_phone_numbers(text: str) -> tuple[str, int]:
-    raise NotImplementedError
+    from cs336_data.filter import mask_phone_numbers
+
+    return mask_phone_numbers(text)
 
 
 def run_mask_ips(text: str) -> tuple[str, int]:
-    raise NotImplementedError
+    from cs336_data.filter import mask_ips
+
+    return mask_ips(text)
 
 
 def run_classify_nsfw(text: str) -> tuple[Any, float]:
