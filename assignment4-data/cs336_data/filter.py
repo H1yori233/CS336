@@ -4,48 +4,7 @@ from fastwarc.warc import ArchiveIterator, WarcRecordType
 import resiliparse.extract.html2text
 import fasttext
 import regex as re
-
-
-def extract_text_from_html_bytes(html_bytes: bytes) -> str | None:
-    # decode the byte string into a Unicode string
-    html_str = None
-    try:
-        html_str = html_bytes.decode("utf-8")
-    except UnicodeDecodeError:
-        # https://resiliparse.chatnoir.eu/en/stable/man/parse/encoding.html
-        enc = resiliparse.parse.encoding.detect_encoding(html_bytes)
-        html_str = html_bytes.decode(enc, errors="replace")
-
-    return resiliparse.extract.html2text.extract_plain_text(html_str)
-
-
-def extract_text_from_warc(file_path: str | os.PathLike) -> Generator[str, None, None]:
-    # https://resiliparse.chatnoir.eu/en/stable/man/fastwarc.html
-    for record in ArchiveIterator(
-        open(file_path, "rb"), record_types=WarcRecordType.response
-    ):
-        record_id = record.record_id
-        html_bytes = record.reader.read()
-        if not html_bytes:
-            continue
-
-        text = extract_text_from_html_bytes(html_bytes)
-        if text and text.strip():
-            yield record_id, text
-
-
-def extract_text_from_wet(file_path: str | os.PathLike) -> Generator[str, None, None]:
-    # https://resiliparse.chatnoir.eu/en/stable/man/fastwarc.html
-    for record in ArchiveIterator(
-        open(file_path, "rb"), record_types=WarcRecordType.conversion
-    ):
-        refers_to_id = record.headers.get("WARC-Refers-To")
-        if not refers_to_id:
-            continue
-
-        wet_text = record.reader.read().decode("utf-8", errors="replace")
-        if wet_text and wet_text.strip():
-            yield refers_to_id, wet_text
+import nltk
 
 
 def identify_language(text: str) -> tuple[Any, float]:
@@ -54,21 +13,48 @@ def identify_language(text: str) -> tuple[Any, float]:
     return label[0].replace("__label__", ""), confidence[0]
 
 
-def mask_emails(text: str) -> tuple[str, int]:
-    pattern = r"[A-Za-z0-9\.\-_]+@[A-Za-z0-9\-_]+\.[a-zA-Z]{2,}"
-    # https://www.geeksforgeeks.org/python/re-subn-in-python/
-    # search for a pattern and replace it with a string
-    masked_text, num_masked = re.subn(pattern, "|||EMAIL_ADDRESS|||", text)
-    return masked_text, num_masked
+def classify_nsfw(text: str) -> tuple[Any, float]:
+    model = fasttext.load_model(
+        "data/classifiers/jigsaw_fasttext_bigrams_nsfw_final.bin"
+    )
+    label, confidence = model.predict(text.replace("\n", " "))
+    return label[0].replace("__label__", ""), confidence[0]
 
 
-def mask_phone_numbers(text: str) -> tuple[str, int]:
-    pattern = r"(?<!\w)(?:\+\d{1,3}[-.\s]?)?(?:\(?\d{1,4}\)?[-.\s]?)?[\d\s.-]{7,}(?!\w)"
-    masked_text, num_masked = re.subn(pattern, "|||PHONE_NUMBER|||", text)
-    return masked_text, num_masked
+def classify_toxic_speech(text: str) -> tuple[Any, float]:
+    model = fasttext.load_model(
+        "data/classifiers/jigsaw_fasttext_bigrams_hatespeech_final.bin"
+    )
+    label, confidence = model.predict(text.replace("\n", " "))
+    return label[0].replace("__label__", ""), confidence[0]
 
 
-def mask_ips(text: str) -> tuple[str, int]:
-    pattern = r"\b(?:\d{1,3}\.){3}\d{1,3}\b"
-    masked_text, num_masked = re.subn(pattern, "|||IP_ADDRESS|||", text)
-    return masked_text, num_masked
+def classify_quality(text: str) -> tuple[Any, float]:
+    raise NotImplementedError
+
+
+def gopher_quality_filter(text: str) -> bool:
+    nltk.data.find("tokenizers/punkt")
+    words = nltk.word_tokenize(text)
+
+    num_words = len(words)
+    if num_words < 50 or num_words > 100000:
+        return False
+
+    total_length = sum(len(word) for word in words)
+    avg_length = total_length / num_words
+    if avg_length < 3 or avg_length > 10:
+        return False
+
+    lines = text.splitlines()
+    num_lines = len(lines)
+    if num_lines > 0:
+        ellipsis_lines = sum(1 for line in lines if line.strip().endswith("..."))
+        if (ellipsis_lines / num_lines) > 0.3:
+            return False
+
+    alphabetic_words = sum(1 for word in words if re.search(r"[a-zA-Z]", word))
+    if (alphabetic_words / num_words) < 0.8:
+        return False
+
+    return True

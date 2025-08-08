@@ -1,6 +1,7 @@
 import os, sys, random
 from tqdm import tqdm
-from cs336_data.filter import extract_text_from_warc, mask_emails, mask_ips, mask_phone_numbers
+from cs336_data.extract import extract_text_from_warc
+from cs336_data.mask import mask_emails, mask_ips, mask_phone_numbers
 
 WARC_FILE_PATH = "data/CC/example.warc.gz"
 

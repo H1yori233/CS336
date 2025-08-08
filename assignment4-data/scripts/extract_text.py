@@ -1,5 +1,5 @@
 import os, sys
-from cs336_data.filter import extract_text_from_warc, extract_text_from_wet
+from cs336_data.extract import extract_text_from_warc, extract_text_from_wet
 
 WARC_FILE_PATH = "data/CC/example.warc.gz"
 WET_FILE_PATH = "data/CC/example.warc.wet.gz"
