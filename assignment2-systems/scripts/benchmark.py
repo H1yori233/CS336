@@ -3,6 +3,7 @@ from timeit import default_timer as timer
 import statistics as stats
 import os
 from datetime import datetime
+from contextlib import nullcontext
 
 import pandas as pd
 import torch
@@ -29,7 +30,7 @@ def resolve_dtype(preferred: str, device: str) -> torch.dtype:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="End-to-end benchmarking of TransformerLM (forward and backward)",
+        description="End-to-end benchmarking of TransformerLM with mixed precision support",
     )
     # Model config
     parser.add_argument("--vocab_size", type=int, default=10000)
@@ -55,6 +56,11 @@ def main():
         default="fp32",
         choices=["fp32", "fp16", "bf16"],
         help="Computation dtype",
+    )
+    parser.add_argument(
+        "--mixed_precision",
+        action="store_true",
+        help="Use mixed precision with autocast (BF16 on CUDA, disabled on CPU)",
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -92,8 +98,8 @@ def main():
         rope_theta=args.rope_theta,
     ).to(device=device)
 
-    # Set compute dtype
-    if dtype in (torch.float16, torch.bfloat16):
+    # Set compute dtype (only if not using mixed precision)
+    if not args.mixed_precision and dtype in (torch.float16, torch.bfloat16):
         model = model.to(dtype=dtype)
 
     # Random input and labels
@@ -110,10 +116,19 @@ def main():
             logits.view(-1, vocab), targets.view(-1)
         )
 
-    # Optional optimizer (no weight decay, simple)
-    optimizer = (
-        torch.optim.AdamW(model.parameters(), lr=1e-3) if args.backward else None
-    )
+    # Optional optimizer and scaler for mixed precision
+    optimizer = None
+    scaler = None
+    if args.backward:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        if args.mixed_precision and device == "cuda":
+            scaler = torch.amp.GradScaler("cuda")
+
+    # Set up autocast context
+    if args.mixed_precision and device == "cuda":
+        autocast_context = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
+    else:
+        autocast_context = nullcontext()
 
     def synchronize():
         if device == "cuda":
@@ -122,24 +137,42 @@ def main():
     # Warmup
     model.train(True)
     for _ in range(args.warmup_steps):
-        logits = model(x)
+        with autocast_context:
+            logits = model(x)
+            if args.backward:
+                loss = compute_loss(logits, y)
+
         if args.backward:
-            loss = compute_loss(logits, y)
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
         synchronize()
 
     # Measured steps
     times_ms = []
     for _ in range(args.measure_steps):
         t0 = timer()
-        logits = model(x)
+
+        with autocast_context:
+            logits = model(x)
+            if args.backward:
+                loss = compute_loss(logits, y)
+
         if args.backward:
-            loss = compute_loss(logits, y)
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
+
         synchronize()
         t1 = timer()
         times_ms.append((t1 - t0) * 1000.0)
@@ -148,8 +181,12 @@ def main():
     std_ms = stats.pstdev(times_ms) if len(times_ms) > 1 else 0.0
 
     mode = "fwd+bwd" if args.backward else "fwd"
+    mixed_precision_str = (
+        "mixed_precision" if args.mixed_precision else "full_precision"
+    )
+
     print(
-        f"device={device}, dtype={dtype}, batch={batch}, seq={seq}, d_model={args.d_model}, layers={args.num_layers}, heads={args.num_heads}, d_ff={args.d_ff}"
+        f"device={device}, dtype={dtype}, mixed_precision={args.mixed_precision}, batch={batch}, seq={seq}, d_model={args.d_model}, layers={args.num_layers}, heads={args.num_heads}, d_ff={args.d_ff}"
     )
     print(
         f"{mode}: {mean_ms:.2f} ms/step ± {std_ms:.2f} (over {args.measure_steps} steps, warmup={args.warmup_steps})"
@@ -163,6 +200,7 @@ def main():
         "timestamp": timestamp,
         "device": device,
         "dtype": str(dtype).replace("torch.", ""),
+        "mixed_precision": args.mixed_precision,
         "mode": mode,
         "vocab_size": args.vocab_size,
         "context_length": args.context_length,
