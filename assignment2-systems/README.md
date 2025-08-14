@@ -6,6 +6,37 @@ For a full description of the assignment, see the assignment handout at
 If you see any issues with the assignment handout or code, please feel free to
 raise a GitHub issue or open a pull request with a fix.
 
+## Modification
+
+To get the project running on my Windows machine, I made the following modifications to the `pyproject.toml` file.
+
+``` toml
+dependencies = [
+  ...
+  "triton-windows>=3; sys_platform == 'win32'",
+]
+```
+
+``` toml
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+explicit = false
+
+[tool.uv.sources]
+cs336-basics = { path = "./cs336-basics", editable = true }
+torch = [
+    { index = "pytorch-cu124", marker = "sys_platform == 'win32'" }
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+```
+
+and regenerated the `uv.lock` file to reflect the new dependencies and sources.
+
 ## Setup
 
 This directory is organized as follows:
