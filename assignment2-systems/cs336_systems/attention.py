@@ -1,11 +1,13 @@
 import torch
 import math
 from einops import rearrange
+import triton
+import triton.language as tl
 
 
 class FlashAttentionAutogradFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, Q, K, V, is_causal):
+    def forward(ctx, Q, K, V, is_causal=False):
         B_r = 16
         B_c = 16
         Q = rearrange(Q, "b (Tr Br) d -> Tr b Br d", Br=B_r)
@@ -16,15 +18,15 @@ class FlashAttentionAutogradFunction(torch.autograd.Function):
         T_r, batch_size, _, d = Q.shape
         T_c = K.shape[0]
 
-        # divide Q, K, V into blocks
+        # initialize O, L
         O = torch.zeros_like(Q)
-        l = torch.zeros(T_r, batch_size, B_r, device=Q.device, dtype=Q.dtype)
+        L = torch.zeros(T_r, batch_size, B_r, device=Q.device, dtype=Q.dtype)
 
         # compute attention
         for i in range(T_r):
             Q_i = Q[i]  # (b, B_r, d)
             O_i = torch.zeros((batch_size, B_r, d), device=Q.device, dtype=Q.dtype)
-            l_i = torch.zeros((batch_size, B_r), device=Q.device, dtype=Q.dtype)
+            L_i = torch.zeros((batch_size, B_r), device=Q.device, dtype=Q.dtype)
             m_i = torch.full(
                 (batch_size, B_r), float("-inf"), device=Q.device, dtype=Q.dtype
             )
@@ -32,35 +34,30 @@ class FlashAttentionAutogradFunction(torch.autograd.Function):
             for j in range(T_c):
                 K_j = K[j]  # (b, B_c, d)
                 V_j = V[j]  # (b, B_c, d)
-                m_prev, l_prev, O_prev = m_i, l_i, O_i
+                m_prev, l_prev, O_prev = m_i, L_i, O_i
 
-                S_ij = torch.einsum("b r d, b c d -> b r c", Q_i, K_j) / math.sqrt(d)
+                S_ij = Q_i @ K_j.transpose(1, 2) / math.sqrt(d)
                 m_ij = S_ij.max(dim=-1).values
                 m_i = torch.max(m_prev, m_ij)  # (b, B_r,)
                 P_ij = torch.exp(S_ij - m_i.unsqueeze(-1))  # (b, B_r, B_c)
 
                 exp_m_diff = torch.exp(m_prev - m_i)  # (b, B_r,)
-                l_i = exp_m_diff * l_prev + P_ij.sum(dim=-1)
+                L_i = exp_m_diff * l_prev + P_ij.sum(dim=-1)
 
-                scaling_diag = torch.diag_embed(exp_m_diff)  # (b, B_r, B_r)
-                O_prev_scaled = torch.einsum(
-                    "b r r, b r d -> b r d", scaling_diag, O_prev
-                )
-                PV_j = torch.einsum("b r c, b c d -> b r d", P_ij, V_j)
-                O_i = O_prev_scaled + PV_j
+                O_prev_scaled = exp_m_diff.unsqueeze(-1) * O_prev  # (b, B_r, d)
+                O_i = O_prev_scaled + P_ij @ V_j
 
-            inv_l_i_diag = torch.diag_embed(1.0 / l_i)
-            O[i] = torch.einsum("b r r, b r d -> b r d", inv_l_i_diag, O_i)
-            l[i] = m_i + torch.log(l_i)
+            O[i] = (1.0 / L_i).unsqueeze(-1) * O_i
+            L[i] = m_i + torch.log(L_i)
 
         O = rearrange(O, "Tr b Br d -> b (Tr Br) d")
-        l = rearrange(l, "Tr b Br -> b (Tr Br)")
+        L = rearrange(L, "Tr b Br -> b (Tr Br)")
         Q = rearrange(Q, "Tr b Br d -> b (Tr Br) d")
         K = rearrange(K, "Tc b Bc d -> b (Tc Bc) d")
         V = rearrange(V, "Tc b Bc d -> b (Tc Bc) d")
 
         ctx.is_causal = is_causal
-        ctx.save_for_backward(Q, K, V, O, l)
+        ctx.save_for_backward(Q, K, V, O, L)
         return O
 
     @staticmethod
@@ -68,10 +65,166 @@ class FlashAttentionAutogradFunction(torch.autograd.Function):
         raise NotImplementedError
 
 
+def cdiv(a, b):
+    return (a + b - 1) // b
+
+
+@triton.jit
+def flash_fwd_kernel(
+    Q_ptr, K_ptr, V_ptr,
+    O_ptr, L_ptr,
+    stride_qb, stride_qq, stride_qd,  # (b, (Tr Br), d)
+    stride_kb, stride_kk, stride_kd,  # (b, (Tc Bc), d)
+    stride_vb, stride_vk, stride_vd,  # (b, (Tc Bc), d)
+    stride_ob, stride_oq, stride_od,  # (b, (Tr Br), d)
+    stride_lb, stride_lq,  # (b, (Tr Br),)
+    N_QUERIES, N_KEYS,
+    scale,
+    D: tl.constexpr,
+    Q_TILE_SIZE: tl.constexpr,
+    K_TILE_SIZE: tl.constexpr,
+    is_causal: tl.constexpr,
+):
+    # Program indices
+    query_tile_index = tl.program_id(0)
+    batch_index = tl.program_id(1)
+
+    # Offset each pointer with the corresponding batch index
+    # multiplied with the batch stride for each tensor
+    Q_block_ptr = tl.make_block_ptr(
+        Q_ptr + batch_index * stride_qb,
+        shape=(N_QUERIES, D),
+        strides=(stride_qq, stride_qd),
+        offsets=(query_tile_index * Q_TILE_SIZE, 0),
+        block_shape=(Q_TILE_SIZE, D),
+        order=(1, 0),  # D dimension is major
+    )
+    K_block_ptr = tl.make_block_ptr(
+        K_ptr + batch_index * stride_kb,
+        shape=(N_KEYS, D),
+        strides=(stride_kk, stride_kd),
+        offsets=(0, 0),  # shared in all tiles
+        block_shape=(K_TILE_SIZE, D),  # (B_c, d)
+        order=(1, 0),
+    )
+    V_block_ptr = tl.make_block_ptr(
+        V_ptr + batch_index * stride_vb,
+        shape=(N_KEYS, D),
+        strides=(stride_vk, stride_vd),
+        offsets=(0, 0),  # shared in all tiles
+        block_shape=(K_TILE_SIZE, D),  # (B_c, d)
+        order=(1, 0),
+    )
+    O_block_ptr = tl.make_block_ptr(
+        O_ptr + batch_index * stride_ob,
+        shape=(N_QUERIES, D),
+        strides=(stride_oq, stride_od),
+        offsets=(query_tile_index * Q_TILE_SIZE, 0),
+        block_shape=(Q_TILE_SIZE, D),
+        order=(1, 0),
+    )
+    L_block_ptr = tl.make_block_ptr(
+        L_ptr + batch_index * stride_lb,
+        shape=(N_QUERIES,),
+        strides=(stride_lq,),
+        offsets=(query_tile_index * Q_TILE_SIZE,),
+        block_shape=(Q_TILE_SIZE,),
+        order=(0,),
+    )
+
+    # load Q_i to on-chip SRAM
+    # since Q_TILE_SIZE might not divide N_QUERIES, and D is fixed, check only the first dim
+    Q_i = tl.load(Q_block_ptr, boundary_check=(0,), padding_option="zero")  # (B_r, d)
+    O_i = tl.zeros((Q_TILE_SIZE, D), dtype=tl.float32)
+    L_i = tl.zeros((Q_TILE_SIZE,), dtype=tl.float32)
+    m_i = tl.full((Q_TILE_SIZE,), -float("inf"), dtype=tl.float32)
+
+    T_c = tl.cdiv(N_KEYS, K_TILE_SIZE)
+    for j in range(T_c):
+        # load K_j, V_j to on-chip SRAM
+        # since K_TILE_SIZE might not divide N_KEYS, and D is fixed, check only the first dim
+        K_j = tl.load(
+            K_block_ptr, boundary_check=(0,), padding_option="zero"
+        )  # (B_c, d)
+        V_j = tl.load(
+            V_block_ptr, boundary_check=(0,), padding_option="zero"
+        )  # (B_c, d)
+        m_prev, l_prev, O_prev = m_i, L_i, O_i
+
+        S_ij = tl.dot(Q_i, tl.trans(K_j)) * scale  # (Br, Bc)
+        if is_causal:
+            query_pos = query_tile_index * Q_TILE_SIZE + tl.arange(0, Q_TILE_SIZE)
+            key_pos = j * K_TILE_SIZE + tl.arange(0, K_TILE_SIZE)
+            mask = query_pos[:, None] >= key_pos[None, :]
+            S_ij = tl.where(mask, S_ij, -float("inf"))
+
+        m_ij = tl.max(S_ij, axis=1)  # (B_r,)
+        m_i = tl.maximum(m_prev, m_ij)  # (B_r,), element-wise maximum
+
+        P_ij = tl.exp(S_ij - m_i[:, None])  # (B_r, B_c)
+        exp_m_diff = tl.exp(m_prev - m_i)  # (B_r,)
+        L_i = exp_m_diff * l_prev + tl.sum(P_ij, axis=1)  # (B_r,)
+        O_i = tl.dot(
+            P_ij.to(V_j.dtype), V_j, acc=exp_m_diff[:, None] * O_prev
+        )  # (B_r, d)
+
+        # advance block pointers at the end of the loop.
+        K_block_ptr = tl.advance(K_block_ptr, (K_TILE_SIZE, 0))
+        V_block_ptr = tl.advance(V_block_ptr, (K_TILE_SIZE, 0))
+
+    O_i = (1.0 / L_i[:, None]) * O_i
+    L_i = m_i + tl.log(L_i)
+
+    # Write O_i, L_i to HBM
+    # cast to output dtypes before storing back to HBM
+    O_i = O_i.to(O_ptr.type.element_ty)
+    L_i = L_i.to(L_ptr.type.element_ty)
+    #  Since Q_TILE_SIZE might not divide N_QUERIES, and D is fixed, check only the first dim
+    tl.store(O_block_ptr, O_i, boundary_check=(0,))
+    tl.store(L_block_ptr, L_i, boundary_check=(0,))
+
+
 class TritonFlashAttentionAutogradFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, weight):
-        raise NotImplementedError
+    def forward(ctx, Q, K, V, is_causal=False):
+        assert Q.is_cuda and K.is_cuda and V.is_cuda, "Expected CUDA tensors"
+        assert (
+            Q.is_contiguous() and K.is_contiguous() and V.is_contiguous()
+        ), "Our pointer arithmetic will assume contiguous Q, K, V"
+
+        B, N_QUERIES, D = Q.shape
+        _, N_KEYS, _ = K.shape
+
+        ctx.Q_TILE_SIZE = 64  # B_r
+        ctx.K_TILE_SIZE = 64  # B_c
+
+        # initialize O, L
+        O = torch.zeros_like(Q)
+        L = torch.zeros((B, N_QUERIES), device=Q.device, dtype=Q.dtype)
+
+        scale = 1.0 / math.sqrt(D)
+        
+        # launch kernel
+        flash_fwd_kernel[
+            (cdiv(N_QUERIES, ctx.Q_TILE_SIZE), B) # (Tq, batch_size)
+        ](
+            Q, K, V,
+            O, L,
+            Q.stride(0), Q.stride(1), Q.stride(2),
+            K.stride(0), K.stride(1), K.stride(2),
+            V.stride(0), V.stride(1), V.stride(2),
+            O.stride(0), O.stride(1), O.stride(2),
+            L.stride(0), L.stride(1),
+            N_QUERIES, N_KEYS,
+            scale,
+            D=D,
+            Q_TILE_SIZE=ctx.Q_TILE_SIZE,
+            K_TILE_SIZE=ctx.K_TILE_SIZE,
+            is_causal=is_causal
+        )
+        
+        ctx.save_for_backward(Q, K, V, O, L)
+        return O
 
     @staticmethod
     def backward(ctx, grad_output):
