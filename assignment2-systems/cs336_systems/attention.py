@@ -125,6 +125,7 @@ class FlashAttentionAutogradFunction(torch.autograd.Function):
         return dQ, dK, dV, None
 
 
+# 8 cdiv 3 = 3
 def cdiv(a, b):
     return (a + b - 1) // b
 
@@ -192,41 +193,36 @@ def flash_fwd_kernel(
         order=(0,),
     )
     input_dtype = Q_ptr.type.element_ty
-
+    acc_dtype = tl.float32
+    
     # load Q_i to on-chip SRAM
     # since Q_TILE_SIZE might not divide N_QUERIES, and D is fixed, check only the first dim
-    Q_i = tl.load(Q_block_ptr, boundary_check=(0,), padding_option="zero") # (B_r, d)
-    if input_dtype == tl.float16 or input_dtype == tl.bfloat16:
-        Q_i = Q_i.to(tl.float32)
-        compute_dtype = tl.float32
-        acc_dtype = tl.float32
-    else:
-        compute_dtype = input_dtype
-        acc_dtype = tl.float32
-    
+    Q_i = tl.load(Q_block_ptr, boundary_check=(0,), padding_option="zero") # (B_r, d)    
     O_i = tl.zeros((Q_TILE_SIZE, D), dtype=acc_dtype)
     L_i = tl.zeros((Q_TILE_SIZE,), dtype=acc_dtype)
     m_i = tl.full((Q_TILE_SIZE,), -float("inf"), dtype=acc_dtype)
 
     T_c = tl.cdiv(N_KEYS, K_TILE_SIZE)
-    for j in range(T_c):
+    q_start = query_tile_index * Q_TILE_SIZE
+    # skipping all tiles that are always all zero
+    max_j = tl.cdiv(q_start + Q_TILE_SIZE, K_TILE_SIZE) if is_causal else T_c
+    T_c_eff = min(T_c, max_j)
+    
+    for j in range(T_c_eff):
+        k_start = j * K_TILE_SIZE
+        
         # load K_j, V_j to on-chip SRAM
         # since K_TILE_SIZE might not divide N_KEYS, and D is fixed, check only the first dim
-        K_j = tl.load(
-            K_block_ptr, boundary_check=(0,), padding_option="zero") # (B_c, d)
-        V_j = tl.load(
-            V_block_ptr, boundary_check=(0,), padding_option="zero") # (B_c, d)
-        if input_dtype == tl.float16 or input_dtype == tl.bfloat16:
-            K_j = K_j.to(compute_dtype)
-            V_j = V_j.to(compute_dtype)
-            
+        K_j = tl.load(K_block_ptr, boundary_check=(0,), padding_option="zero") # (B_c, d)
+        V_j = tl.load(V_block_ptr, boundary_check=(0,), padding_option="zero") # (B_c, d)
         m_prev, l_prev, O_prev = m_i, L_i, O_i
 
+        # keep Q_i and K_j in their original low precision for tl.dot
         S_ij = tl.dot(Q_i, tl.trans(K_j)) * scale  # (Br, Bc)
-        if is_causal:
-            query_pos = query_tile_index * Q_TILE_SIZE + tl.arange(0, Q_TILE_SIZE) # (B_r,)
-            key_pos = j * K_TILE_SIZE + tl.arange(0, K_TILE_SIZE) # (B_c,)
-            mask = query_pos[:, None] >= key_pos[None, :] # (B_r, 1) >= (1, B_c) -> (B_r, B_c)
+        if is_causal and q_start < (k_start + K_TILE_SIZE - 1): # diagonal case
+            q_pos = q_start + tl.arange(0, Q_TILE_SIZE) # (B_r,)
+            k_pos = k_start + tl.arange(0, K_TILE_SIZE) # (B_c,)
+            mask = q_pos[:, None] >= k_pos[None, :] # (B_r, 1) >= (1, B_c) -> (B_r, B_c)
             S_ij = tl.where(mask, S_ij, -float("inf"))
 
         m_ij = tl.max(S_ij, axis=1)  # (B_r,)
@@ -237,7 +233,8 @@ def flash_fwd_kernel(
         L_ij = tl.sum(P_ij, axis=1)  # (B_r,)
         L_i = exp_m_diff * l_prev + L_ij  # (B_r,)
         O_i = tl.dot(
-            P_ij.to(V_j.dtype), V_j, acc=exp_m_diff[:, None] * O_prev
+            P_ij.to(V_j.dtype), V_j, 
+            acc=exp_m_diff[:, None] * O_prev
         )  # (B_r, d)
 
         # advance block pointers at the end of the loop.
@@ -340,48 +337,52 @@ def flash_backward_dkv_kernel(
         order=(1, 0),
     )
     input_dtype = K_ptr.type.element_ty
+    acc_dtype = tl.float32
     
     # load K_j, V_j to on-chip SRAM
     # since K_TILE_SIZE might not divide N_KEYS, and D is fixed, check only the first dim
     K_j = tl.load(K_block_ptr, boundary_check=(0,), padding_option="zero") # (B_c, d)
     V_j = tl.load(V_block_ptr, boundary_check=(0,), padding_option="zero") # (B_c, d)
-    if input_dtype == tl.float16 or input_dtype == tl.bfloat16:
-        compute_dtype = tl.float32
-        acc_dtype = tl.float32
-        K_j = K_j.to(compute_dtype)
-        V_j = V_j.to(compute_dtype)
-    else:
-        compute_dtype = input_dtype
-        acc_dtype = tl.float32
-    
     dK_j = tl.zeros((K_TILE_SIZE, D), dtype=acc_dtype)
     dV_j = tl.zeros((K_TILE_SIZE, D), dtype=acc_dtype)
     
     T_r = tl.cdiv(N_QUERIES, Q_TILE_SIZE)
-    for i in range(T_r):
+    k_start = key_tile_index * K_TILE_SIZE
+    min_i = tl.cdiv(k_start, Q_TILE_SIZE) if is_causal else 0
+    # advance pointers to the correct starting query tile for causal masking
+    if is_causal:
+        start_offset_q = min_i * Q_TILE_SIZE
+        Q_block_ptr = tl.advance(Q_block_ptr, (start_offset_q, 0))
+        dO_block_ptr = tl.advance(dO_block_ptr, (start_offset_q, 0))
+        L_block_ptr = tl.advance(L_block_ptr, (start_offset_q,))
+        D_block_ptr = tl.advance(D_block_ptr, (start_offset_q,))
+    
+    for i in range(min_i, T_r):
+        q_start = i * Q_TILE_SIZE
+        
+        # load Q_i, dO_i, L_i, D_i to on-chip SRAM
         Q_i = tl.load(Q_block_ptr, boundary_check=(0,), padding_option="zero")  # (B_r, d)
         dO_i = tl.load(dO_block_ptr, boundary_check=(0,), padding_option="zero")  # (B_r, d)
         L_i = tl.load(L_block_ptr, boundary_check=(0,), padding_option="zero")  # (B_r,)
         D_i = tl.load(D_block_ptr, boundary_check=(0,), padding_option="zero")  # (B_r,)
-        if input_dtype == tl.float16 or input_dtype == tl.bfloat16:
-            Q_i = Q_i.to(compute_dtype)
-            dO_i = dO_i.to(compute_dtype)
-            L_i = L_i.to(compute_dtype)
-            D_i = D_i.to(compute_dtype)
         
-        # on-chip compute
+        # keep Q_i and K_j in their original low precision for tl.dot
         S_ij = tl.dot(Q_i, tl.trans(K_j)) * scale  # (B_r, B_c)
-        if is_causal:
-            query_pos = i * Q_TILE_SIZE + tl.arange(0, Q_TILE_SIZE)  # (B_r,)
-            key_pos = key_tile_index * K_TILE_SIZE + tl.arange(0, K_TILE_SIZE)  # (B_c,)
-            mask = query_pos[:, None] >= key_pos[None, :]  # (B_r, B_c)
+        if is_causal and q_start < (k_start + K_TILE_SIZE - 1): # diagonal case
+            q_pos = q_start + tl.arange(0, Q_TILE_SIZE)  # (B_r,)
+            k_pos = k_start + tl.arange(0, K_TILE_SIZE)  # (B_c,)
+            mask = q_pos[:, None] >= k_pos[None, :]  # (B_r, B_c)
             S_ij = tl.where(mask, S_ij, -float("inf"))
         
         P_ij = tl.exp(S_ij - L_i[:, None])  # (B_r, B_c)
-        dV_j = dV_j + tl.dot(tl.trans(P_ij), dO_i)  # (B_c, d)
+        dV_j = dV_j + tl.dot(
+            tl.trans(P_ij).to(input_dtype), dO_i
+        )  # (B_c, d)
         dP_ij = tl.dot(dO_i, tl.trans(V_j))  # (B_r, B_c)
         dS_ij = P_ij * (dP_ij - D_i[:, None])  # (B_r, B_c)
-        dK_j = dK_j + tl.dot(tl.trans(dS_ij), Q_i) * scale  # (B_c, d)
+        dK_j = dK_j + tl.dot(
+            tl.trans(dS_ij).to(input_dtype), Q_i
+        ) * scale  # (B_c, d)
         
         # advance block pointers at the end of the loop.
         Q_block_ptr = tl.advance(Q_block_ptr, (Q_TILE_SIZE, 0))
@@ -474,45 +475,40 @@ def flash_backward_dq_kernel(
         order=(1, 0),
     )
     input_dtype = Q_ptr.type.element_ty
+    acc_dtype = tl.float32
     
     Q_i = tl.load(Q_block_ptr, boundary_check=(0,), padding_option="zero")  # (B_r, d)
     dO_i = tl.load(dO_block_ptr, boundary_check=(0,), padding_option="zero")  # (B_r, d)
     L_i = tl.load(L_block_ptr, boundary_check=(0,), padding_option="zero")  # (B_r,)
     D_i = tl.load(D_block_ptr, boundary_check=(0,), padding_option="zero")  # (B_r,)
-    if input_dtype == tl.float16 or input_dtype == tl.bfloat16:
-        compute_dtype = tl.float32
-        acc_dtype = tl.float32
-        Q_i = Q_i.to(compute_dtype)
-        dO_i = dO_i.to(compute_dtype)
-        L_i = L_i.to(compute_dtype)
-        D_i = D_i.to(compute_dtype)
-    else:
-        compute_dtype = input_dtype
-        acc_dtype = tl.float32
-    
     dQ_i = tl.zeros((Q_TILE_SIZE, D), dtype=acc_dtype)
     
     T_c = tl.cdiv(N_KEYS, K_TILE_SIZE)
-    for j in range(T_c):
+    q_start = query_tile_index * Q_TILE_SIZE
+    # skipping all tiles that are always all zero
+    max_j = tl.cdiv(q_start + Q_TILE_SIZE, K_TILE_SIZE) if is_causal else T_c
+    T_c_eff = min(T_c, max_j)
+    
+    for j in range(T_c_eff):
+        k_start = j * K_TILE_SIZE
+        
+        # load K_j, V_j to on-chip SRAM
         K_j = tl.load(K_block_ptr, boundary_check=(0,), padding_option="zero")  # (B_c, d)
         V_j = tl.load(V_block_ptr, boundary_check=(0,), padding_option="zero")  # (B_c, d)
-        if input_dtype == tl.float16 or input_dtype == tl.bfloat16:
-            K_j = K_j.to(compute_dtype)
-            V_j = V_j.to(compute_dtype)
         
-        # on-chip compute
+        # keep Q_i and K_j in their original low precision for tl.dot
         S_ij = tl.dot(Q_i, tl.trans(K_j)) * scale  # (B_r, B_c)
-        if is_causal:
-            query_pos = query_tile_index * Q_TILE_SIZE + tl.arange(0, Q_TILE_SIZE)  # (B_r,)
-            key_pos = j * K_TILE_SIZE + tl.arange(0, K_TILE_SIZE)  # (B_c,)
-            mask = query_pos[:, None] >= key_pos[None, :]  # (B_r, B_c)
+        if is_causal and q_start < (k_start + K_TILE_SIZE - 1): # diagonal case
+            q_pos = q_start + tl.arange(0, Q_TILE_SIZE)  # (B_r,)
+            k_pos = k_start + tl.arange(0, K_TILE_SIZE)  # (B_c,)
+            mask = q_pos[:, None] >= k_pos[None, :]  # (B_r, B_c)
             S_ij = tl.where(mask, S_ij, -float("inf"))
         
         P_ij = tl.exp(S_ij - L_i[:, None])  # (B_r, B_c)
         dP_ij = tl.dot(dO_i, tl.trans(V_j))  # (B_r, B_c)
         dS_ij = P_ij * (dP_ij - D_i[:, None])  # (B_r, B_c)
         
-        dQ_i = dQ_i + tl.dot(dS_ij, K_j) * scale # (B_r, d)
+        dQ_i = dQ_i + tl.dot(dS_ij.to(input_dtype), K_j) * scale # (B_r, d)
         
         # advance block pointers at the end of the loop.
         K_block_ptr = tl.advance(K_block_ptr, (K_TILE_SIZE, 0))
@@ -638,4 +634,4 @@ class TritonFlashAttentionAutogradFunction(torch.autograd.Function):
             is_causal=ctx.is_causal
         )
         
-        return  dQ.to(Q.dtype), dK, dV, None
+        return dQ.to(Q.dtype), dK, dV, None
