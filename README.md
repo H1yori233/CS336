@@ -6,7 +6,7 @@ If you believe any content in this repository violates academic integrity polici
 
 - [X] assignment 1
 - [ ] assignment 2
-- [ ] assignment 4
+- [ ] assignment 4 (still need to complete the leaderboard)
 - [ ] assignment 5
 
 
